@@ -1,0 +1,9 @@
+{
+  "type": "module",
+  "scripts": {
+    "start": "node MQTT-broker.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.15.0"
+  }
+}
