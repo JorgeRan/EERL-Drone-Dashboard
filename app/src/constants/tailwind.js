@@ -35,5 +35,6 @@ export const color = {
   green: '#6ad6c2',
   greenSoft: 'rgba(106, 214, 194, 0.16)',
   warning: '#f0c15d',
-  offline: '#b3afb7'
+  offline: '#b3afb7',
+  transparent: '#ffffff00',
 }

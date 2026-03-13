@@ -1,149 +1,178 @@
-import React, { useEffect, useRef, useState } from "react";
-import { tw, color } from "../constants/tailwind";
+import React, { useEffect, useMemo, useRef } from 'react'
+import mapboxgl from 'mapbox-gl'
+import { tw, color } from '../constants/tailwind'
+import {
+  buildMethanePlumeDataset,
+  traceOrigin,
+} from '../data/methaneTraceData'
 
-const latitude = 45.3844;
-const longitude = -75.699;
-const altitude = 10;
-const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+const latitude = traceOrigin.latitude
+const longitude = traceOrigin.longitude
+const altitude = traceOrigin.altitude
+const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN
 
-let googleMaps3DLoader = null;
-
-function loadGoogleMaps3D(apiKey) {
-  if (!apiKey) {
-    return Promise.reject(new Error("Missing Google Maps API key"));
-  }
-
-  if (window.customElements?.get("gmp-map-3d")) {
-    return Promise.resolve();
-  }
-
-  if (googleMaps3DLoader) {
-    return googleMaps3DLoader;
-  }
-
-  googleMaps3DLoader = new Promise((resolve, reject) => {
-    const existingScript = document.querySelector('script[data-google-maps-3d="true"]');
-
-    if (existingScript) {
-      existingScript.addEventListener("load", () => resolve(), { once: true });
-      existingScript.addEventListener(
-        "error",
-        () => reject(new Error("Failed to load Google Maps 3D script")),
-        { once: true },
-      );
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.async = true;
-    script.defer = true;
-    script.dataset.googleMaps3d = "true";
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&v=beta&libraries=maps3d`;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Failed to load Google Maps 3D script"));
-    document.head.appendChild(script);
-  });
-
-  return googleMaps3DLoader;
-}
-
-export function Position() {
-  const mapContainerRef = useRef(null);
-  const [loadError, setLoadError] = useState("");
+export function Position({ traceDataset }) {
+  const mapContainerRef = useRef(null)
+  const mapRef = useRef(null)
+  const methanePlumeDataset = useMemo(() => buildMethanePlumeDataset(traceDataset), [traceDataset])
+  const methanePositiveCount = useMemo(
+    () => traceDataset.features.filter((feature) => feature.properties.methane > 0).length,
+    [traceDataset],
+  )
+  const methanePeakValue = useMemo(
+    () => Math.max(0, ...traceDataset.features.map((feature) => feature.properties.methane)),
+    [traceDataset],
+  )
 
   useEffect(() => {
-    if (!googleMapsApiKey || !mapContainerRef.current) {
-      return undefined;
+    if (!mapboxToken || !mapContainerRef.current || mapRef.current) {
+      return undefined
     }
 
-    let isMounted = true;
-    let mapElement = null;
+    mapboxgl.accessToken = mapboxToken
 
-    loadGoogleMaps3D(googleMapsApiKey)
-      .then(() => {
-        if (!isMounted || !mapContainerRef.current) {
-          return;
-        }
+    const map = new mapboxgl.Map({
+      container: mapContainerRef.current,
+      style: 'mapbox://styles/mapbox/satellite-streets-v12',
+      center: [longitude, latitude],
+      zoom: 17.2,
+      pitch: 72,
+      bearing: 34,
+      attributionControl: false,
+      antialias: true,
+    })
 
-        mapContainerRef.current.innerHTML = "";
-        mapElement = document.createElement("gmp-map-3d");
-        mapElement.setAttribute("center", `${latitude}, ${longitude}, ${altitude}`);
-        mapElement.setAttribute("range", "1200");
-        mapElement.setAttribute("tilt", "68");
-        mapElement.setAttribute("heading", "35");
-        mapElement.setAttribute("mode", "hybrid");
-        mapElement.style.display = "block";
-        mapElement.style.width = "100%";
-        mapElement.style.height = "100%";
+    mapRef.current = map
+    map.addControl(new mapboxgl.NavigationControl(), 'top-right')
 
-        mapContainerRef.current.appendChild(mapElement);
-        setLoadError("");
+    map.on('style.load', () => {
+      map.addSource('mapbox-dem', {
+        type: 'raster-dem',
+        url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+        tileSize: 512,
+        maxzoom: 14,
       })
-      .catch((error) => {
-        if (isMounted) {
-          setLoadError(error.message || "Failed to load Google Maps 3D.");
-        }
-      });
+
+      map.setTerrain({ source: 'mapbox-dem', exaggeration: 1.35 })
+      map.setFog({
+        color: 'rgba(255, 255, 255, 0.06)',
+        'high-color': 'rgba(20, 31, 52, 0.14)',
+        'space-color': '#0f172a',
+        'horizon-blend': 0.08,
+      })
+
+      map.addSource('methane-plume', {
+        type: 'geojson',
+        data: methanePlumeDataset,
+      })
+
+      map.addLayer({
+        id: 'methane-plume-columns',
+        type: 'fill-extrusion',
+        source: 'methane-plume',
+        paint: {
+          'fill-extrusion-color': ['get', 'pointColor'],
+          'fill-extrusion-base': ['get', 'baseHeight'],
+          'fill-extrusion-height': ['get', 'plumeHeight'],
+          'fill-extrusion-opacity': 0.82,
+          'fill-extrusion-vertical-gradient': true,
+        },
+      })
+
+      map.addLayer({
+        id: 'methane-plume-caps',
+        type: 'line',
+        source: 'methane-plume',
+        paint: {
+          'line-color': 'rgba(255,255,255,0.88)',
+          'line-width': 1.1,
+          'line-opacity': 0.45,
+        },
+      })
+    })
+
+    map.on('load', () => {
+      map.resize()
+    })
 
     return () => {
-      isMounted = false;
-      if (mapContainerRef.current) {
-        mapContainerRef.current.innerHTML = "";
-      }
-    };
-  }, []);
+      map.remove()
+      mapRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const currentMap = mapRef.current
+    const plumeSource = currentMap?.getSource('methane-plume')
+
+    if (plumeSource) {
+      plumeSource.setData(methanePlumeDataset)
+    }
+  }, [methanePlumeDataset])
 
   return (
-    <div className={tw.panel} style={{ backgroundColor: color.card, padding: "0.75rem" }}>
-      <div className="flex h-full w-full flex-col gap-3">
-        <div className="flex items-start justify-between gap-3">
+    <div className={tw.panel} style={{ backgroundColor: color.card, padding: '0.75rem' }}>
+      <div className='flex h-full w-full flex-col gap-3'>
+        <div className='flex items-start justify-between gap-3'>
           <div>
-            <p className="text-xs uppercase tracking-[0.18em]" style={{ color: color.green }}>
+            <p className='text-xs uppercase tracking-[0.18em]' style={{ color: color.green }}>
               3D position
             </p>
-            <p className="text-xl font-bold tracking-tight" style={{ color: color.text }}>
-              Terrain perspective
+            <p className='text-xl font-bold tracking-tight' style={{ color: color.text }}>
+              Terrain plume view
             </p>
           </div>
           <div
-            className="rounded-full px-3 py-1 text-xs font-medium"
+            className='rounded-full px-3 py-1 text-xs font-medium'
             style={{ backgroundColor: color.greenSoft, color: color.green }}
           >
-            3D live
+            plume live
           </div>
         </div>
 
-        <div className="my-1 flex flex-wrap gap-x-4 gap-y-2 text-sm" style={{ color: color.textMuted }}>
+        {/* <div className='my-1 flex flex-wrap gap-x-4 gap-y-2 text-sm' style={{ color: color.textMuted }}>
           <span>lat: {latitude.toFixed(4)}° N</span>
           <span>lon: {Math.abs(longitude).toFixed(4)}° W</span>
           <span>alt: {altitude} m</span>
+        </div> */}
+
+        <div className='grid gap-3 md:grid-cols-2'>
+          <div className='rounded-lg border px-3 py-2.5' style={{ backgroundColor: color.surface, borderColor: color.border }}>
+            <div className='text-[11px] uppercase tracking-[0.12em]' style={{ color: color.text }}>
+              Plume columns
+            </div>
+            <div className='mt-1 flex items-baseline gap-2'>
+              <span className='text-lg font-semibold' style={{ color: color.orange }}>{methanePositiveCount}</span>
+              <span className='text-sm' style={{ color: color.textMuted }}>methane detections extruded</span>
+            </div>
+          </div>
+
+          <div className='rounded-lg border px-3 py-2.5' style={{ backgroundColor: color.surface, borderColor: color.border }}>
+            <div className='text-[11px] uppercase tracking-[0.12em]' style={{ color: color.text }}>
+              Peak plume value
+            </div>
+            <div className='mt-1 flex items-baseline gap-2'>
+              <span className='text-lg font-semibold' style={{ color: color.green }}>{methanePeakValue.toFixed(2)}</span>
+              <span className='text-sm' style={{ color: color.textMuted }}>ppm equivalent</span>
+            </div>
+          </div>
         </div>
 
-        {googleMapsApiKey ? (
+        {mapboxToken ? (
           <div
             ref={mapContainerRef}
-            className="min-h-[360px] w-full rounded-lg border"
+            className='h-full w-full rounded-lg border'
             style={{ borderColor: color.border }}
           />
         ) : (
           <div
-            className="flex min-h-[360px] w-full items-center justify-center rounded-lg border px-6 text-center"
-            style={{
-              backgroundColor: color.surface,
-              borderColor: color.border,
-              color: color.textMuted,
-            }}
+            className='flex min-h-[360px] w-full items-center justify-center rounded-lg border px-6 text-center'
+            style={{ backgroundColor: color.surface, borderColor: color.border, color: color.textMuted }}
           >
-            Set VITE_GOOGLE_MAPS_API_KEY in app/.env and restart the Vite dev server to load the Google 3D terrain view.
+            Set VITE_MAPBOX_TOKEN in app/.env and restart the Vite dev server to load the 3D terrain plume view.
           </div>
         )}
-
-        {loadError ? (
-          <p className="text-sm" style={{ color: color.warning }}>
-            {loadError}
-          </p>
-        ) : null}
       </div>
     </div>
-  );
+  )
 }

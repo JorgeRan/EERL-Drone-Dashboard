@@ -1,12 +1,11 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import viteLogo from "/vite.svg";
+import { useMemo, useState } from "react";
 import { tw, color } from "./constants/tailwind";
 import { DeviceTabs } from "./components/Tabs";
 import { MethanePanel } from "./components/MethanePanel";
 import { Map } from "./components/Map";
 import { WindPanel } from "./components/WindPanel";
 import { Position } from "./components/3DPosition";
+import { flowChartData, methaneTraceDataset, sliceTraceDataset } from "./data/methaneTraceData";
 
 let devices = [
   {
@@ -30,7 +29,15 @@ let devices = [
 ];
 
 function App() {
-  const [count, setCount] = useState(0);
+  const [selectedWindow, setSelectedWindow] = useState({
+    startIndex: 0,
+    endIndex: flowChartData.length - 1,
+  });
+
+  const filteredTraceDataset = useMemo(
+    () => sliceTraceDataset(methaneTraceDataset, selectedWindow.startIndex, selectedWindow.endIndex),
+    [selectedWindow],
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-[#f8fafc] text-slate-900 font-sans">
@@ -42,11 +49,15 @@ function App() {
         <section className={tw.shell}>
           <div className="grid w-full gap-3">
             <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]">
-              <Map />
-              <Position />
+              <Map traceDataset={filteredTraceDataset} />
+              <Position traceDataset={filteredTraceDataset} />
             </div>
             <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]">
-              <MethanePanel />
+              <MethanePanel
+                flowData={flowChartData}
+                selection={selectedWindow}
+                onSelectionChange={setSelectedWindow}
+              />
               <WindPanel/>
             </div>
           </div>
