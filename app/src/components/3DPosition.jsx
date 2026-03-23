@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef } from 'react'
 import mapboxgl from 'mapbox-gl'
 import { tw, color } from '../constants/tailwind'
+import { buildMethaneColorExpression } from '../constants/methaneScale'
 import {
   buildMethanePlumeDataset,
   traceOrigin,
@@ -8,12 +9,14 @@ import {
 
 const latitude = traceOrigin.latitude
 const longitude = traceOrigin.longitude
-const altitude = traceOrigin.altitude
 const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN
 
-export function Position({ traceDataset }) {
+export function Position({ traceDataset, lowerLimit = 0, upperLimit = 5, selectedDroneId }) {
   const mapContainerRef = useRef(null)
   const mapRef = useRef(null)
+  const initialPlumeDatasetRef = useRef(buildMethanePlumeDataset(traceDataset))
+  const initialLowerLimitRef = useRef(lowerLimit)
+  const initialUpperLimitRef = useRef(upperLimit)
   const methanePlumeDataset = useMemo(() => buildMethanePlumeDataset(traceDataset), [traceDataset])
   const methanePositiveCount = useMemo(
     () => traceDataset.features.filter((feature) => feature.properties.methane > 0).length,
@@ -23,6 +26,20 @@ export function Position({ traceDataset }) {
     () => Math.max(0, ...traceDataset.features.map((feature) => feature.properties.methane)),
     [traceDataset],
   )
+  const selectedFocusCoordinates = useMemo(() => {
+    if (!Array.isArray(traceDataset.features) || traceDataset.features.length === 0) {
+      return [longitude, latitude]
+    }
+
+    const lastFeature = traceDataset.features[traceDataset.features.length - 1]
+    const [lng, lat] = lastFeature?.geometry?.coordinates || [longitude, latitude]
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return [longitude, latitude]
+    }
+
+    return [lng, lat]
+  }, [traceDataset])
 
   useEffect(() => {
     if (!mapboxToken || !mapContainerRef.current || mapRef.current) {
@@ -46,6 +63,9 @@ export function Position({ traceDataset }) {
     map.addControl(new mapboxgl.NavigationControl(), 'top-right')
 
     map.on('style.load', () => {
+      const initialLower = initialLowerLimitRef.current
+      const initialUpper = initialUpperLimitRef.current
+
       map.addSource('mapbox-dem', {
         type: 'raster-dem',
         url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
@@ -96,7 +116,7 @@ export function Position({ traceDataset }) {
 
       map.addSource('methane-plume', {
         type: 'geojson',
-        data: methanePlumeDataset,
+        data: initialPlumeDatasetRef.current,
       })
 
       map.addLayer({
@@ -104,7 +124,7 @@ export function Position({ traceDataset }) {
         type: 'fill-extrusion',
         source: 'methane-plume',
         paint: {
-          'fill-extrusion-color': ['get', 'pointColor'],
+          'fill-extrusion-color': buildMethaneColorExpression(initialLower, initialUpper),
           'fill-extrusion-base': ['get', 'baseHeight'],
           'fill-extrusion-height': ['get', 'plumeHeight'],
           'fill-extrusion-opacity': 0.82,
@@ -142,6 +162,30 @@ export function Position({ traceDataset }) {
       plumeSource.setData(methanePlumeDataset)
     }
   }, [methanePlumeDataset])
+
+  useEffect(() => {
+    const currentMap = mapRef.current
+
+    if (!currentMap || !currentMap.getLayer('methane-plume-columns')) {
+      return
+    }
+
+    currentMap.setPaintProperty('methane-plume-columns', 'fill-extrusion-color', buildMethaneColorExpression(lowerLimit, upperLimit))
+  }, [lowerLimit, upperLimit])
+
+  useEffect(() => {
+    const currentMap = mapRef.current
+
+    if (!currentMap) {
+      return
+    }
+
+    currentMap.easeTo({
+      center: selectedFocusCoordinates,
+      duration: 900,
+      essential: true,
+    })
+  }, [selectedDroneId, selectedFocusCoordinates])
 
   return (
     <div className={tw.panel} style={{ backgroundColor: color.card, padding: '0.75rem' }}>

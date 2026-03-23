@@ -374,7 +374,7 @@ export function FlowChart({ flowData, selection, onSelectionChange }) {
             style={{ color: color.textMuted }}
           >
             <div>
-              <div>T1 = {formatDuration(windowStart?.timestampMs ?? "--").slice(4)}</div>
+              <div>T1 = {formatDuration(windowStart?.timestampMs ?? "--").slice(4)}</div> 
               <div>T2 = {formatDuration(windowEnd?.timestampMs ?? "--").slice(4)}</div>
             </div>
             <div className="flex items-center">

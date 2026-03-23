@@ -2,6 +2,7 @@
   "dependencies": {
     "events": "^3.3.0",
     "express": "^5.2.1",
+    "firebase": "^12.11.0",
     "http": "^0.0.1-security",
     "path": "^0.12.7",
     "url": "^0.11.4"

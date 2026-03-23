@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { tw, color } from "../constants/tailwind";
 import { Chart, calculateWindRose, classifyDir } from "@eunchurn/react-windrose";
 
-const windSamples = [
+const fallbackWindSamples = [
   { u: 1.4, v: -3.8, w: 0.2 },
   { u: 1.9, v: -4.1, w: 0.4 },
   { u: 2.2, v: -4.6, w: 0.5 },
@@ -24,8 +24,18 @@ const windSamples = [
 const windColumns = ["angle", "0-1", "1-2", "2-3", "3-4", "4-5", "5-6", "6-7", "7+"];
 const primaryAngles = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 
-export function WindPanel() {
+export function WindPanel({ windSamples = fallbackWindSamples }) {
   const { chartData, prevailingDirection, averageSpeed, peakSpeed, averageVertical } = useMemo(() => {
+    if (!windSamples.length) {
+      return {
+        chartData: [],
+        prevailingDirection: "N",
+        averageSpeed: 0,
+        peakSpeed: 0,
+        averageVertical: 0,
+      };
+    }
+
     const speed = windSamples.map(({ u, v }) => Math.sqrt(u * u + v * v));
     const direction = windSamples.map(({ u, v }) => {
       return (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
