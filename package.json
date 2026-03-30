@@ -52,6 +52,7 @@
       "owner": "JorgeRan",
       "repo": "MQTT-DRONE-DATA"
     },
+    "asar": false,
     "mac": {
       "icon": "build/icon.icns",
       "target": [
