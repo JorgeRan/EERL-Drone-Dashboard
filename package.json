@@ -12,7 +12,8 @@
     "build:web": "npm --prefix app run build",
     "build": "npm run build:web && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
     "dist": "npm run build",
-    "lint": "npm --prefix app run lint"
+    "lint": "npm --prefix app run lint",
+    "publish": "npm run build:web && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish always"
   },
   "dependencies": {
     "events": "^3.3.0",
@@ -45,6 +46,11 @@
       "mqtt-bridge/**/*",
       "package.json"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "JorgeRan",
+      "repo": "MQTT-DRONE-DATA"
+    },
     "mac": {
       "icon": "build/icon.icns",
       "target": [
