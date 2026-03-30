@@ -1,6 +1,7 @@
 {
   "name": "mqtt-drone-data",
   "private": true,
+  "author": "JorgeRan",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
