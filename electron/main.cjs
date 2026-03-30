@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 let bridgeProcess = null;
+let brokerProcess = null;
 
 function getDevIconPath() {
   return path.join(__dirname, '..', 'build', 'icon.png');
@@ -15,6 +16,10 @@ function getBridgeScriptPath() {
   }
 
   return path.join(__dirname, '..', 'mqtt-bridge', 'bridge_to_hivemq_cloud.mjs');
+}
+
+function getBrokerScriptPath() {
+  return path.join(__dirname, '..', 'backend', 'MQTT-broker.js');
 }
 
 function startBridgeProcess() {
@@ -29,7 +34,6 @@ function startBridgeProcess() {
     return;
   }
 
-  // Use the Electron binary in Node mode so the same executable can run the bridge script.
   bridgeProcess = spawn(process.execPath, [bridgeScriptPath], {
     env: {
       ...process.env,
@@ -55,6 +59,45 @@ function stopBridgeProcess() {
   }
 
   bridgeProcess.kill();
+}
+
+function startBrokerProcess() {
+  if (brokerProcess) {
+    return;
+  }
+
+  const brokerScriptPath = getBrokerScriptPath();
+
+  if (!fs.existsSync(brokerScriptPath)) {
+    console.error('Broker script not found:', brokerScriptPath);
+    return;
+  }
+
+  brokerProcess = spawn(process.execPath, [brokerScriptPath], {
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1'
+    },
+    stdio: 'inherit'
+  });
+
+  brokerProcess.on('exit', (code, signal) => {
+    console.log(`Broker process exited (code=${code}, signal=${signal})`);
+    brokerProcess = null;
+  });
+
+  brokerProcess.on('error', (error) => {
+    console.error('Failed to start broker process:', error.message);
+    brokerProcess = null;
+  });
+}
+
+function stopBrokerProcess() {
+  if (!brokerProcess || brokerProcess.killed) {
+    return;
+  }
+
+  brokerProcess.kill();
 }
 
 function createWindow() {
@@ -100,6 +143,7 @@ app.whenReady().then(() => {
   }
 
   startBridgeProcess();
+  startBrokerProcess();
   createWindow();
 
   app.on('activate', () => {
@@ -111,6 +155,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopBridgeProcess();
+  stopBrokerProcess();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -118,4 +163,5 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopBridgeProcess();
+  stopBrokerProcess();
 });

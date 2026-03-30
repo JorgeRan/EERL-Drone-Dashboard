@@ -17,11 +17,17 @@
     "publish": "npm run build:web && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish always"
   },
   "dependencies": {
+    "dotenv": "^17.3.1",
     "events": "^3.3.0",
     "express": "^5.2.1",
     "http": "^0.0.1-security",
+    "mqtt": "^5.15.0",
     "n-gram": "^2.0.2",
     "path": "^0.12.7",
+    "postgres": "^3.4.8",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1",
+    "ws": "^8.18.3",
     "url": "^0.11.4"
   },
   "devDependencies": {
