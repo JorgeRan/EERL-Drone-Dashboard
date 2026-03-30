@@ -27,3 +27,6 @@ dist-ssr
 .env.development
 .env.production.example
 .env.development.example
+release
+dist-electron
+*.blockmap

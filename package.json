@@ -1,14 +1,68 @@
 {
+  "name": "mqtt-drone-data-electron",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Electron desktop app for drone telemetry and methane visualization",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev:web": "npm --prefix app run dev",
+    "dev:electron": "wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:electron\"",
+    "start": "npm run build:web && electron .",
+    "build:web": "npm --prefix app run build",
+    "build": "npm run build:web && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
+    "dist": "npm run build",
+    "lint": "npm --prefix app run lint"
+  },
   "dependencies": {
     "events": "^3.3.0",
     "express": "^5.2.1",
-    "firebase": "^12.11.0",
     "http": "^0.0.1-security",
+    "n-gram": "^2.0.2",
     "path": "^0.12.7",
     "url": "^0.11.4"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.2.1",
-    "tailwindcss": "^4.2.1"
+    "@electron-forge/publisher-github": "^7.11.1",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^37.2.4",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.jorgeran.mqttdronedata",
+    "productName": "MQTT Drone Data",
+    "directories": {
+      "app": ".",
+      "output": "release"
+    },
+    "files": [
+      "build/icon.png",
+      "electron/**/*",
+      "app/dist/**/*",
+      "backend/**/*",
+      "mqtt-bridge/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ]
+    }
   }
 }

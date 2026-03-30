@@ -63,6 +63,7 @@ const updateDrone = (drone) => {
 
     drone.sniffer_ppm = Math.max(0, 1.2 + Math.sin(Date.now() / 3500 + radians) * 0.8 + jitter(0.2));
     drone.purway_ppn = Math.max(0, 86 + Math.sin(Date.now() / 4200 + radians) * 6 + jitter(1.2));
+    
     drone.wind_u = Math.sin(radians) * 0.9 + jitter(0.08);
     drone.wind_v = Math.cos(radians) * 0.9 + jitter(0.08);
     drone.wind_w = Math.sin(Date.now() / 5000 + radians) * 0.3 + jitter(0.04);

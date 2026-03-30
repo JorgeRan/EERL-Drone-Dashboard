@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import mapboxgl from 'mapbox-gl'
 import m350Marker from '../assets/M350.png'
+import satelliteImage from '../assets/satellite.png'
 import { tw, color } from '../constants/tailwind'
+import { buildOfflineImageCoordinates, buildOfflineSatelliteStyle, shouldUseOnlineMap } from '../constants/offlineMap'
 import {
     buildHeatmapColorExpression,
     buildHeatmapWeightExpression,
@@ -35,6 +37,8 @@ const normalizeDroneState = (entry) => ({
     altitude: toFiniteNumber(entry.altitude),
     battery: toFiniteNumber(entry.battery),
     speed: toFiniteNumber(entry.speed),
+    sniffer: toFiniteNumber(entry.sniffer),
+    purway: toFiniteNumber(entry.purway),
     methane: toFiniteNumber(entry.methane),
     payload: entry.payload || {},
 })
@@ -55,7 +59,9 @@ const buildDroneFeatureCollection = (drones) => ({
                 altitude: drone.altitude,
                 battery: drone.battery,
                 speed: drone.speed,
-                methane: drone.methane,
+                sniffer: drone.sniffer,
+                purway: drone.purway,
+                methane: Number.isFinite(drone.purway) ? drone.purway : drone.methane,
                 ts: drone.ts,
             },
         })),
@@ -92,6 +98,7 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
     const [lowerLimitInput, setLowerLimitInput] = useState('0')
     const [droneStates, setDroneStates] = useState([])
     const [isTelemetryConnected, setIsTelemetryConnected] = useState(false)
+    const [mapMode, setMapMode] = useState(() => (shouldUseOnlineMap(mapboxToken) ? 'online' : 'offline'))
     const methaneScale = buildMethaneScale(lowerLimit, upperLimit)
     const methaneGradient = buildMethaneGradient(lowerLimit, upperLimit)
     const focusedDrone = droneStates.find((drone) => drone.drone_id === selectedDroneId) || droneStates[0] || null
@@ -146,15 +153,28 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
     }
 
     useEffect(() => {
-        if (!mapboxToken || !mapContainerRef.current || mapRef.current) {
+        if (!mapContainerRef.current || mapRef.current) {
             return undefined
         }
 
-        mapboxgl.accessToken = mapboxToken
+        const isOnlineMode = shouldUseOnlineMap(mapboxToken)
+        const offlineCoordinates = buildOfflineImageCoordinates({
+            centerLat: latitude,
+            centerLon: longitude,
+        })
+
+        if (isOnlineMode) {
+            mapboxgl.accessToken = mapboxToken
+        }
 
         const map = new mapboxgl.Map({
             container: mapContainerRef.current,
-            style: 'mapbox://styles/mapbox/satellite-streets-v12',
+            style: isOnlineMode
+                ? 'mapbox://styles/mapbox/satellite-streets-v12'
+                : buildOfflineSatelliteStyle({
+                    imageUrl: satelliteImage,
+                    coordinates: offlineCoordinates,
+                }),
             center: [displayLongitude, displayLatitude],
             zoom: 18,
             pitch: 0,
@@ -162,6 +182,7 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
             attributionControl: false,
         })
 
+        setMapMode(isOnlineMode ? 'online' : 'offline')
         mapRef.current = map
         popupRef.current = new mapboxgl.Popup({
             closeButton: false,
@@ -199,6 +220,13 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
             .addTo(map)
 
         map.on('load', () => {
+            if (!isOnlineMode) {
+                map.fitBounds([offlineCoordinates[3], offlineCoordinates[1]], {
+                    duration: 0,
+                    padding: 30,
+                })
+            }
+
             const initialLowerLimit = initialLowerLimitRef.current
             const initialUpperLimit = initialUpperLimitRef.current
 
@@ -207,31 +235,31 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
                 data: initialTraceDatasetRef.current,
             })
 
-            map.addLayer({
-                id: 'methane-trace-heatmap',
-                type: 'heatmap',
-                source: 'methane-traces',
-                filter: ['>', ['get', 'methane'], 0],
-                paint: {
-                    'heatmap-weight': buildHeatmapWeightExpression(initialLowerLimit, initialUpperLimit),
-                    'heatmap-intensity': [
-                        'interpolate',
-                        ['linear'],
-                        ['zoom'],
-                        13, 0.65,
-                        18, 1.25,
-                    ],
-                    'heatmap-color': buildHeatmapColorExpression(initialLowerLimit, initialUpperLimit),
-                    'heatmap-radius': [
-                        'interpolate',
-                        ['linear'],
-                        ['zoom'],
-                        13, 18,
-                        18, 34,
-                    ],
-                    'heatmap-opacity': 0.8,
-                },
-            })
+            // map.addLayer({
+            //     id: 'methane-trace-heatmap',
+            //     type: 'heatmap',
+            //     source: 'methane-traces',
+            //     filter: ['>', ['get', 'methane'], 0],
+            //     paint: {
+            //         'heatmap-weight': buildHeatmapWeightExpression(initialLowerLimit, initialUpperLimit),
+            //         'heatmap-intensity': [
+            //             'interpolate',
+            //             ['linear'],
+            //             ['zoom'],
+            //             13, 0.65,
+            //             18, 1.25,
+            //         ],
+            //         'heatmap-color': buildHeatmapColorExpression(initialLowerLimit, initialUpperLimit),
+            //         'heatmap-radius': [
+            //             'interpolate',
+            //             ['linear'],
+            //             ['zoom'],
+            //             13, 18,
+            //             18, 34,
+            //         ],
+            //         'heatmap-opacity': 0.8,
+            //     },
+            // })
 
             map.addLayer({
                 id: 'methane-trace-zero-points',
@@ -316,14 +344,17 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
                         return
                     }
 
-                    const { methane, altitude: pointAltitude, sampleIndex, timeLabel } = hoveredFeature.properties
+                    const { methane, averageMethane, sniffer, purway, altitude: pointAltitude, sampleIndex, timeLabel } = hoveredFeature.properties
                     map.getCanvas().style.cursor = 'pointer'
                     popupRef.current
                         .setLngLat(event.lngLat)
                         .setHTML(`
                             <div style="min-width: 148px; color: #e5eef8;">
                                 <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: #9fb0c2;">Sample ${sampleIndex}</div>
-                                <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">Methane ${Number(methane).toFixed(2)} ppm</div>
+                                <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">Purway ${Number(methane).toFixed(2)}</div>
+                                <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
+                                <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 avg ${Number(averageMethane ?? methane).toFixed(2)}</div>
+                                <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway raw ${Number(purway ?? methane).toFixed(2)}</div>
                                 <div style="margin-top: 4px; font-size: 12px; color: #d2dce8;">Altitude ${Number(pointAltitude).toFixed(0)} m</div>
                                 <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">Flight mark ${timeLabel}</div>
                             </div>
@@ -347,7 +378,7 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
                     return
                 }
 
-                const { droneId, altitude: liveAltitude, battery, speed, methane, ts } = feature.properties
+                const { droneId, altitude: liveAltitude, battery, speed, methane, sniffer, purway, ts } = feature.properties
                 map.getCanvas().style.cursor = 'pointer'
 
                 popupRef.current
@@ -358,7 +389,8 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
                             <div style="margin-top: 4px; font-size: 12px; color: #ffffff;">Alt ${Number(liveAltitude || 0).toFixed(1)} m</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Battery ${battery ?? '-'}%</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Speed ${speed ?? '-'} m/s</div>
-                            <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${methane ?? '-'} ppm</div>
+                            <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? methane ?? '-'} ppm</div>
+                            <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${sniffer ?? '-'} ppm</div>
                             <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">${ts ? new Date(ts).toLocaleString() : ''}</div>
                         </div>
                     `)
@@ -543,7 +575,7 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
                             color: isTelemetryConnected ? color.orange : color.textMuted,
                         }}
                     >
-                        {isTelemetryConnected ? 'Live telemetry' : 'Waiting telemetry'}
+                        {isTelemetryConnected ? 'Live telemetry' : 'Waiting telemetry'} • {mapMode}
                     </div>
                 </div>
 
@@ -555,20 +587,11 @@ export function Map({ traceDataset, onScaleChange, selectedDroneId }) {
                 </div>
 
                 <div className='flex items-stretch gap-2'>
-                    {mapboxToken ? (
-                        <div
-                            ref={mapContainerRef}
-                            className='min-h-[460px] w-full rounded-lg border'
-                            style={{ borderColor: color.border }}
-                        />
-                    ) : (
-                        <div
-                            className='flex min-h-[360px] w-full items-center justify-center rounded-lg border px-6 text-center'
-                            style={{ backgroundColor: color.surface, borderColor: color.border, color: color.textMuted }}
-                        >
-                            Set VITE_MAPBOX_TOKEN in app/.env and restart the Vite dev server to load the map.
-                        </div>
-                    )}
+                    <div
+                        ref={mapContainerRef}
+                        className='min-h-[460px] w-full rounded-lg border'
+                        style={{ borderColor: color.border }}
+                    />
 
                     <div className='flex h-full min-w-[100px] items-center gap-3'>
                         <div className='flex h-[292px] items-stretch gap-2'>

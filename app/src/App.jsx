@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { tw, color } from "./constants/tailwind";
 import { DeviceTabs } from "./components/Tabs";
 import { MethanePanel } from "./components/MethanePanel";
@@ -11,6 +11,7 @@ import {
   flowChartData,
   methaneTraceDataset,
 } from "./data/methaneTraceData";
+import logoSvg from "./assets/EERL_logo_black.svg";
 
 const backendHttpUrl = (
   import.meta.env.VITE_BACKEND_URL || `http://${window.location.hostname}:3000`
@@ -76,6 +77,7 @@ const buildFlowDataFromHistory = (historyRows) => {
       wind_u: Number(payload.wind_u ?? 0),
       wind_v: Number(payload.wind_v ?? 0),
       wind_w: Number(payload.wind_w ?? 0),
+      distance: row.distance ?? null,
     };
   });
 };
@@ -106,6 +108,7 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
     wind_u: Number(payload.wind_u ?? 0),
     wind_v: Number(payload.wind_v ?? 0),
     wind_w: Number(payload.wind_w ?? 0),
+    distance: null,
   };
 };
 
@@ -302,20 +305,55 @@ function App() {
     return entries;
   }, [flowDataByDrone]);
 
+  const reloadHistory = useCallback(async (droneId) => {
+    try {
+      const response = await fetch(`${backendHttpUrl}/api/drones/${droneId}/history?limit=1000`);
+      if (!response.ok) return false;
+
+      const payload = await response.json();
+      if (!Array.isArray(payload?.data) || payload.data.length === 0) return false;
+
+      const flowData = buildFlowDataFromHistory(payload.data);
+      const previousFlowData = flowDataByDrone[droneId] || [];
+      const previousLastPoint = previousFlowData[previousFlowData.length - 1] || null;
+      const nextLastPoint = flowData[flowData.length - 1] || null;
+      const hasChanged =
+        previousFlowData.length !== flowData.length ||
+        previousLastPoint?.timestampIso !== nextLastPoint?.timestampIso ||
+        previousLastPoint?.distance !== nextLastPoint?.distance ||
+        previousLastPoint?.methane !== nextLastPoint?.methane;
+
+      if (hasChanged) {
+        setFlowDataByDrone((previous) => ({ ...previous, [droneId]: flowData }));
+      }
+
+      return hasChanged;
+    } catch {
+      return false;
+    }
+  }, [flowDataByDrone]);
+
+  const reloadAllHistory = useCallback(async () => {
+    const refreshResults = await Promise.all(
+      devices.map((device) => reloadHistory(device.id)),
+    );
+
+    return refreshResults.some(Boolean);
+  }, [reloadHistory]);
+
   const activeDevice =
     devices.find((device) => device.id === selectedDeviceId) || devices[0];
   const activePoint = latestPointByDrone[selectedDeviceId] || null;
 
   return (
     <div className="flex min-h-screen flex-col bg-[#f8fafc] text-slate-900 font-sans">
-      {/* Top navigation */}
       <header
         className="flex items-center justify-between border-b px-4 py-2.5"
         style={{ backgroundColor: color.surface, borderColor: color.border }}
       >
         <div className="flex items-center gap-2">
           <img
-            src="/EERL_logo_black.svg"
+            src={logoSvg}
             alt="EERL Logo"
             className="h-7 w-auto object-contain"
           />
@@ -351,6 +389,9 @@ function App() {
             flowDataByDrone={flowDataByDrone}
             selectedDeviceId={selectedDeviceId}
             onSelectDevice={setSelectedDeviceId}
+            backendUrl={backendHttpUrl}
+            onImportComplete={() => reloadHistory(selectedDeviceId)}
+            onRefresh={reloadAllHistory}
           />
         ) : null}
         <section className={tw.shell} style={{ display: currentView === 'dashboard' ? undefined : 'none' }}>
