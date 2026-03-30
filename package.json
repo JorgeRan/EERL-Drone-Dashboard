@@ -36,6 +36,7 @@
     "appId": "com.jorgeran.mqttdronedata",
     "productName": "MQTT Drone Data",
     "directories": {
+      "buildResources": "build",
       "output": "release"
     },
     "files": [
