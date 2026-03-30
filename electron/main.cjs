@@ -1,9 +1,60 @@
 const { app, BrowserWindow } = require('electron');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+let bridgeProcess = null;
+
 function getDevIconPath() {
   return path.join(__dirname, '..', 'build', 'icon.png');
+}
+
+function getBridgeScriptPath() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'mqtt-bridge', 'bridge_to_hivemq_cloud.mjs');
+  }
+
+  return path.join(__dirname, '..', 'mqtt-bridge', 'bridge_to_hivemq_cloud.mjs');
+}
+
+function startBridgeProcess() {
+  if (bridgeProcess) {
+    return;
+  }
+
+  const bridgeScriptPath = getBridgeScriptPath();
+
+  if (!fs.existsSync(bridgeScriptPath)) {
+    console.error('Bridge script not found:', bridgeScriptPath);
+    return;
+  }
+
+  // Use the Electron binary in Node mode so the same executable can run the bridge script.
+  bridgeProcess = spawn(process.execPath, [bridgeScriptPath], {
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1'
+    },
+    stdio: 'inherit'
+  });
+
+  bridgeProcess.on('exit', (code, signal) => {
+    console.log(`Bridge process exited (code=${code}, signal=${signal})`);
+    bridgeProcess = null;
+  });
+
+  bridgeProcess.on('error', (error) => {
+    console.error('Failed to start bridge process:', error.message);
+    bridgeProcess = null;
+  });
+}
+
+function stopBridgeProcess() {
+  if (!bridgeProcess || bridgeProcess.killed) {
+    return;
+  }
+
+  bridgeProcess.kill();
 }
 
 function createWindow() {
@@ -48,6 +99,7 @@ app.whenReady().then(() => {
     }
   }
 
+  startBridgeProcess();
   createWindow();
 
   app.on('activate', () => {
@@ -58,7 +110,12 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  stopBridgeProcess();
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', () => {
+  stopBridgeProcess();
 });

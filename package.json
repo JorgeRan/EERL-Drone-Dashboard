@@ -53,6 +53,15 @@
       "owner": "JorgeRan",
       "repo": "MQTT-DRONE-DATA"
     },
+    "extraResources": [
+      {
+        "from": "mqtt-bridge",
+        "to": "mqtt-bridge",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "asar": false,
     "mac": {
       "icon": "build/icon.icns",
