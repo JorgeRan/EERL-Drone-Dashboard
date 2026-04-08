@@ -8,7 +8,6 @@ const TELEMETRY_TABLE = "telemetry_events";
 const resetTelemetryTable = async () => {
     await sql.unsafe(`DELETE FROM ${TELEMETRY_TABLE}`);
 
-    // SQLite stores AUTOINCREMENT state in sqlite_sequence.
     await sql.unsafe(
         `DELETE FROM sqlite_sequence WHERE name = ?`,
         [TELEMETRY_TABLE],
