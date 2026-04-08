@@ -36,10 +36,20 @@ jobs:
       - name: Install backend dependencies
         run: npm ci --prefix backend
 
+      - name: Validate map token for build
+        env:
+          VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
+        run: |
+          if [ -z "$VITE_MAPBOX_TOKEN" ]; then
+            echo "Missing secret: VITE_MAPBOX_TOKEN"
+            echo "Set it in Repository Settings -> Secrets and variables -> Actions"
+            exit 1
+          fi
+
       - name: Build frontend
+        env:
+          VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
         run: npm run build:web
-          env:
-            VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
 
       - name: Build and publish (macOS)
         if: matrix.os == 'macos-latest'
