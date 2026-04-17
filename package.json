@@ -57,7 +57,8 @@
     "publish": {
       "provider": "github",
       "owner": "JorgeRan",
-      "repo": "EERL-Drone-Dashboard"
+      "repo": "EERL-Drone-Dashboard",
+      "releaseType": "release"
     },
     "extraResources": [
       {
