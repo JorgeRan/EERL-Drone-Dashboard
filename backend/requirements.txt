@@ -1,0 +1,8 @@
+ipykernel==7.2.0
+jupyter_client==8.8.0
+jupyter_core==5.9.1
+matplotlib==3.10.8
+nbconvert==7.17.1
+nbformat==5.10.4
+numpy==2.4.4
+scipy==1.17.1

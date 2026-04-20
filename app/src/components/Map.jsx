@@ -142,13 +142,13 @@ const fitMapToTraceDataset = (
 };
 
 export function Map({
-  status,
   traceDataset,
   onScaleChange,
   selectedDroneId,
   resultsPageMode,
   heatmapEnabled = true,
   plumeViewEnabled = false,
+  traceOpacity = 1,
   onPlumeViewAutoChange,
 }) {
   const mapContainerRef = useRef(null);
@@ -175,6 +175,10 @@ export function Map({
   );
   const methaneScale = buildMethaneScale(lowerLimit, upperLimit);
   const methaneGradient = buildMethaneGradient(lowerLimit, upperLimit);
+  const safeTraceOpacity = Math.min(
+    1,
+    Math.max(0, Number.isFinite(Number(traceOpacity)) ? Number(traceOpacity) : 1),
+  );
   const methanePlumeDataset = useMemo(
     () => buildMethanePlumeDataset(traceDataset),
     [traceDataset],
@@ -395,11 +399,11 @@ export function Map({
           ],
           "heatmap-opacity": resultsPageMode
             ? heatmapEnabled
-              ? 0.78
+              ? 0.78 * safeTraceOpacity
               : 0
             : plumeViewEnabled
               ? heatmapEnabled
-                ? 0.2
+                ? 0.2 * safeTraceOpacity
                 : 0
               : 0,
         },
@@ -410,6 +414,9 @@ export function Map({
         type: "circle",
         source: "methane-traces",
         filter: ["==", ["get", "methane"], 0],
+        layout: {
+          "circle-sort-key": ["get", "methane"],
+        },
         paint: {
           "circle-color": ["get", "pointColor"],
           "circle-radius": [
@@ -423,11 +430,12 @@ export function Map({
           ],
           "circle-stroke-width": 0.9,
           "circle-stroke-color": "rgba(255,255,255,0.72)",
+          "circle-stroke-opacity": 0.72 * safeTraceOpacity,
           "circle-opacity": resultsPageMode
-            ? 0.18
+            ? 0.18 * safeTraceOpacity
             : plumeViewEnabled
-              ? 0.15
-              : 0.88,
+              ? 0.15 * safeTraceOpacity
+              : 0.88 * safeTraceOpacity,
         },
       });
 
@@ -436,6 +444,9 @@ export function Map({
         type: "circle",
         source: "methane-traces",
         filter: [">", ["get", "methane"], 0],
+        layout: {
+          "circle-sort-key": ["get", "methane"],
+        },
         paint: {
           "circle-color": buildMethaneColorExpression(
             initialLowerLimit,
@@ -447,11 +458,12 @@ export function Map({
           ),
           "circle-stroke-width": 1,
           "circle-stroke-color": "rgba(255,255,255,0.9)",
+          "circle-stroke-opacity": 0.9 * safeTraceOpacity,
           "circle-opacity": resultsPageMode
-            ? 0.95
+            ? 0.95 * safeTraceOpacity
             : plumeViewEnabled
-              ? 0.15
-              : 0.8,
+              ? 0.15 * safeTraceOpacity
+              : 0.8 * safeTraceOpacity,
         },
       });
 
@@ -460,6 +472,9 @@ export function Map({
         type: "circle",
         source: "methane-traces",
         filter: [">", ["get", "methane"], 0],
+        layout: {
+          "circle-sort-key": ["get", "methane"],
+        },
         paint: {
           "circle-color": buildMethaneColorExpression(
             initialLowerLimit,
@@ -472,14 +487,14 @@ export function Map({
           "circle-blur": 0.72,
           "circle-opacity": resultsPageMode
             ? heatmapEnabled
-              ? 0.46
+              ? 0.46 * safeTraceOpacity
               : 0
             : plumeViewEnabled
               ? heatmapEnabled
-                ? 0.1
+                ? 0.1 * safeTraceOpacity
                 : 0
               : heatmapEnabled
-                ? 0.36
+                ? 0.36 * safeTraceOpacity
                 : 0,
         },
       });
@@ -500,7 +515,7 @@ export function Map({
           ),
           "fill-extrusion-base": ["get", "baseHeight"],
           "fill-extrusion-height": ["get", "plumeHeight"],
-          "fill-extrusion-opacity": plumeViewEnabled ? 0.82 : 0,
+          "fill-extrusion-opacity": plumeViewEnabled ? 0.82 * safeTraceOpacity : 0,
           "fill-extrusion-vertical-gradient": true,
         },
       });
@@ -512,7 +527,7 @@ export function Map({
         paint: {
           "line-color": "rgba(255,255,255,0.88)",
           "line-width": 1.1,
-          "line-opacity": plumeViewEnabled ? 0.45 : 0,
+          "line-opacity": plumeViewEnabled ? 0.45 * safeTraceOpacity : 0,
         },
       });
 
@@ -567,6 +582,8 @@ export function Map({
             purway,
             acetylene,
             nitrousOxide,
+            displayMetricLabel,
+            displayMetricUnits,
             sensorMode,
             altitude: pointAltitude,
             sampleIndex,
@@ -580,10 +597,10 @@ export function Map({
               `
                             <div style="min-width: 148px; color: #e5eef8;">
                                 <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: #9fb0c2;">Sample ${sampleIndex}</div>
-                                <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">${isAerisTrace ? "CH4" : "Purway"} ${Number(methane ?? 0).toFixed(2)} ${isAerisTrace ? "ppm" : "ppm-m"}</div>
+                                <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">${displayMetricLabel || (isAerisTrace ? "CH4" : "Purway")} ${Number(methane ?? 0).toFixed(2)} ${displayMetricUnits || (isAerisTrace ? "ppm" : "ppm-m")}</div>
                                 ${
                                   isAerisTrace
-                                    ? ""
+                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
                                     : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
                                 }
                                 ${
@@ -805,9 +822,21 @@ export function Map({
         "circle-opacity",
       ) ?? 0.88,
     );
+    const startZeroStrokeOpacity = Number(
+      currentMap.getPaintProperty(
+        "methane-trace-zero-points",
+        "circle-stroke-opacity",
+      ) ?? 0.72,
+    );
     const startHotspotOpacity = Number(
       currentMap.getPaintProperty("methane-trace-hotspots", "circle-opacity") ??
         0.8,
+    );
+    const startHotspotStrokeOpacity = Number(
+      currentMap.getPaintProperty(
+        "methane-trace-hotspots",
+        "circle-stroke-opacity",
+      ) ?? 0.9,
     );
     const startHaloOpacity = Number(
       currentMap.getPaintProperty("methane-trace-halo", "circle-opacity") ??
@@ -816,33 +845,35 @@ export function Map({
 
     const targetHeatmapOpacity = resultsPageMode
       ? heatmapEnabled
-        ? 0.78
+        ? 0.78 * safeTraceOpacity
         : 0
       : plumeViewEnabled
         ? heatmapEnabled
-          ? 0.2
+          ? 0.2 * safeTraceOpacity
           : 0
         : 0;
     const targetZeroOpacity = resultsPageMode
-      ? 0.18
+      ? 0.18 * safeTraceOpacity
       : plumeViewEnabled
-        ? 0.15
-        : 0.88;
+        ? 0.15 * safeTraceOpacity
+        : 0.88 * safeTraceOpacity;
+    const targetZeroStrokeOpacity = 0.72 * safeTraceOpacity;
     const targetHotspotOpacity = resultsPageMode
-      ? 0.95
+      ? 0.95 * safeTraceOpacity
       : plumeViewEnabled
-        ? 0.15
-        : 0.8;
+        ? 0.15 * safeTraceOpacity
+        : 0.8 * safeTraceOpacity;
+    const targetHotspotStrokeOpacity = 0.9 * safeTraceOpacity;
     const targetHaloOpacity = resultsPageMode
       ? heatmapEnabled
-        ? 0.46
+        ? 0.46 * safeTraceOpacity
         : 0
       : plumeViewEnabled
         ? heatmapEnabled
-          ? 0.1
+          ? 0.1 * safeTraceOpacity
           : 0
         : heatmapEnabled
-          ? 0.36
+          ? 0.36 * safeTraceOpacity
           : 0;
     const startPlumeOpacity = Number(
       currentMap.getPaintProperty(
@@ -853,8 +884,8 @@ export function Map({
     const startPlumeCapsOpacity = Number(
       currentMap.getPaintProperty("methane-plume-caps", "line-opacity") ?? 0,
     );
-    const targetPlumeOpacity = plumeViewEnabled ? 0.82 : 0;
-    const targetPlumeCapsOpacity = plumeViewEnabled ? 0.45 : 0;
+    const targetPlumeOpacity = plumeViewEnabled ? 0.82 * safeTraceOpacity : 0;
+    const targetPlumeCapsOpacity = plumeViewEnabled ? 0.45 * safeTraceOpacity : 0;
     const durationMs = 420;
     const startAt = performance.now();
 
@@ -874,10 +905,22 @@ export function Map({
         startZeroOpacity + (targetZeroOpacity - startZeroOpacity) * eased,
       );
       currentMap.setPaintProperty(
+        "methane-trace-zero-points",
+        "circle-stroke-opacity",
+        startZeroStrokeOpacity +
+          (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
+      );
+      currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-opacity",
         startHotspotOpacity +
           (targetHotspotOpacity - startHotspotOpacity) * eased,
+      );
+      currentMap.setPaintProperty(
+        "methane-trace-hotspots",
+        "circle-stroke-opacity",
+        startHotspotStrokeOpacity +
+          (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-halo",
@@ -926,7 +969,7 @@ export function Map({
         plumeTransitionFrameRef.current = null;
       }
     };
-  }, [heatmapEnabled, mapMode, plumeViewEnabled, resultsPageMode]);
+  }, [heatmapEnabled, mapMode, plumeViewEnabled, resultsPageMode, safeTraceOpacity]);
 
   useEffect(() => {
     const currentMap = mapRef.current;

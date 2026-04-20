@@ -27,6 +27,11 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Install root dependencies
         run: npm ci
 
@@ -35,6 +40,22 @@ jobs:
 
       - name: Install backend dependencies
         run: npm ci --prefix backend
+
+      - name: Create backend virtualenv (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/bin/python -m pip install --upgrade pip
+          backend/.venv/bin/python -m pip install -r backend/requirements.txt
+
+      - name: Create backend virtualenv (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/Scripts/python.exe -m pip install --upgrade pip
+          backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
 
       - name: Validate map token for build
         shell: bash

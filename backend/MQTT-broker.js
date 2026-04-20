@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { createServer } from "http";
 import { createSocket } from "node:dgram";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import dns from "node:dns/promises";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -397,7 +398,18 @@ const runAerisNotebook = async (inputPayload = null) => {
   const notebookPath = path.join(__dirname, AERIS_NOTEBOOK_FILE);
   const notebookInputPath = path.join(__dirname, AERIS_NOTEBOOK_INPUT_FILE);
   let brokerResult = null;
+  const bundledVenvDir = path.join(__dirname, ".venv");
+  const bundledPythonCandidates = process.platform === "win32"
+    ? [
+        path.join(bundledVenvDir, "Scripts", "python.exe"),
+        path.join(bundledVenvDir, "Scripts", "python3.exe"),
+      ]
+    : [
+        path.join(bundledVenvDir, "bin", "python3"),
+        path.join(bundledVenvDir, "bin", "python"),
+      ];
   const pythonCandidates = [
+    ...bundledPythonCandidates.filter((candidate) => existsSync(candidate)),
     process.env.PYTHON_EXECUTABLE,
     "python3",
     "python",
@@ -658,6 +670,23 @@ const parseTimestamp = (value) => {
 };
 
 const parseDroneId = (topic, payload) => {
+  const normalizeDroneValue = (value) => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return `M${Math.trunc(value)}`;
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+
+      return /^\d+$/.test(trimmed) ? `M${trimmed}` : trimmed;
+    }
+
+    return null;
+  };
+
   if (typeof payload.droneId === "string" && payload.droneId.trim()) {
     return payload.droneId.trim();
   }
@@ -668,6 +697,11 @@ const parseDroneId = (topic, payload) => {
 
   if (typeof payload.drone === "string" && payload.drone.trim()) {
     return payload.drone.trim();
+  }
+
+  const normalizedDrone = normalizeDroneValue(payload.drone);
+  if (normalizedDrone) {
+    return normalizedDrone;
   }
 
   const topicParts = topic.split("/").filter(Boolean);
@@ -692,7 +726,7 @@ const normalizeTelemetry = (topic, rawPayload) => {
     rawPayload.sniffer_ppm,
     rawPayload.sniffer_methane,
   );
-  const purway = pickNumber(
+  const explicitPurway = pickNumber(
     rawPayload.purway,
     rawPayload.purway_ppm_m,
     rawPayload.purway_ppm,
@@ -713,6 +747,11 @@ const normalizeTelemetry = (topic, rawPayload) => {
     rawPayload.methane_ppm,
     rawPayload.ch4,
   );
+  const purway =
+    explicitPurway ??
+    (Number.isFinite(sniffer) && Number.isFinite(explicitMethane)
+      ? explicitMethane
+      : null);
   const sensorMode =
     typeof rawPayload.sensorMode === "string" && rawPayload.sensorMode.trim()
       ? rawPayload.sensorMode.trim().toLowerCase()
@@ -725,9 +764,29 @@ const normalizeTelemetry = (topic, rawPayload) => {
 
   let methane = explicitMethane;
 
+  if (purway === explicitMethane && Number.isFinite(sniffer)) {
+    methane = sniffer;
+  }
+
   if (!Number.isFinite(methane)) {
     methane = Number.isFinite(sniffer) ? sniffer : null;
   }
+
+  const windU = pickNumber(
+    rawPayload.wind_u,
+    rawPayload.windU,
+    rawPayload.wind_direction?.x,
+  );
+  const windV = pickNumber(
+    rawPayload.wind_v,
+    rawPayload.windV,
+    rawPayload.wind_direction?.y,
+  );
+  const windW = pickNumber(
+    rawPayload.wind_w,
+    rawPayload.windW,
+    rawPayload.wind_direction?.z,
+  );
 
   return {
     droneId,
@@ -782,6 +841,10 @@ const normalizeTelemetry = (topic, rawPayload) => {
     distance: pickNumber(rawPayload.distance),
     payload: {
       ...rawPayload,
+      purway,
+      wind_u: windU,
+      wind_v: windV,
+      wind_w: windW,
       sensorMode,
       methane,
       acetylene,
@@ -1381,6 +1444,29 @@ app.delete("/api/missions/:id", async (req, res) => {
   } catch (error) {
     console.error("Delete mission endpoint error:", error.message);
     return res.status(500).json({ error: "Failed to delete mission" });
+  }
+});
+
+app.delete("/api/data", async (_req, res) => {
+  try {
+    await sql.unsafe(`DELETE FROM ${TELEMETRY_TABLE}`);
+    const deletedTelemetryRows = await sql.unsafe("SELECT changes() AS count");
+
+    await sql.unsafe(`DELETE FROM ${LATEST_STATE_TABLE}`);
+    const deletedLatestRows = await sql.unsafe("SELECT changes() AS count");
+
+    await sql.unsafe(`DELETE FROM ${MISSIONS_TABLE}`);
+    const deletedMissionRows = await sql.unsafe("SELECT changes() AS count");
+
+    return res.json({
+      ok: true,
+      deletedTelemetry: Number(deletedTelemetryRows?.[0]?.count ?? 0),
+      deletedLatestState: Number(deletedLatestRows?.[0]?.count ?? 0),
+      deletedMissions: Number(deletedMissionRows?.[0]?.count ?? 0),
+    });
+  } catch (error) {
+    console.error("Delete all data endpoint error:", error.message);
+    return res.status(500).json({ error: "Failed to delete all data" });
   }
 });
 

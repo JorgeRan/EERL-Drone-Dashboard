@@ -13,8 +13,10 @@ import {
 } from "../constants/telemetryMetrics";
 import { Map } from "./Map";
 import { MethanePanel } from "./MethanePanel";
+import { OpacityAdjuster } from "./OpacitySlider";
 import { filterTraceDatasetBySelection } from "../data/methaneTraceData";
 import {
+  deleteAllData,
   deleteMission,
   listMissions,
   listTelemetryHistory,
@@ -43,6 +45,7 @@ const DEFAULT_TEMPERATURE_K = 293.15;
 const DEFAULT_PRESSURE_PA = 101325.0;
 const DEFAULT_TRANSECT_WIDTH_M = 80.0;
 const DEFAULT_MIXING_HEIGHT_M = 25.0;
+const DELETE_ALL_HOLD_MS = 2000;
 
 const sensorModePresentation = (sensorMode) => {
   if (sensorMode === SENSOR_MODE_AERIS) {
@@ -94,26 +97,73 @@ const formatDateTimeLocalValue = (value) => {
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
 };
 
+const getTraceDisplayMetric = (point) => {
+  if (point.sensorMode === SENSOR_MODE_AERIS) {
+    const aerisCandidates = [
+      { label: "CH4", units: "ppm", value: toFiniteNumber(point.methane) },
+      {
+        label: "Acetylene",
+        units: "ppm",
+        value: toFiniteNumber(point.acetylene),
+      },
+      {
+        label: "Nitrous Oxide",
+        units: "ppm",
+        value: toFiniteNumber(point.nitrousOxide),
+      },
+    ].filter((candidate) => candidate.value !== null && candidate.value > 0);
+
+    if (aerisCandidates.length) {
+      return aerisCandidates.reduce((best, candidate) =>
+        candidate.value > best.value ? candidate : best,
+      );
+    }
+
+    return { label: "CH4", units: "ppm", value: 0 };
+  }
+
+  const purway = toFiniteNumber(point.purway);
+  if (purway !== null) {
+    return { label: "Purway", units: "ppm-m", value: Math.max(0, purway) };
+  }
+
+  return {
+    label: "CH4",
+    units: "ppm",
+    value: Math.max(0, toFiniteNumber(point.methane) ?? 0),
+  };
+};
+
 const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
   type: "FeatureCollection",
   features: filterCoordinateOutliers(datasetFlowData)
-    .filter(
-      (point) =>
-        Number.isFinite(point.latitude) && Number.isFinite(point.longitude),
-    )
+    .filter((point) => {
+      const useTargetCoordinates = point.payload?.map_coordinates === "target";
+      const latitude = useTargetCoordinates
+        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
+        : point.latitude;
+      const longitude = useTargetCoordinates
+        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
+        : point.longitude;
+
+      return Number.isFinite(latitude) && Number.isFinite(longitude);
+    })
     .map((point) => {
-      const traceValue =
-        point.sensorMode === SENSOR_MODE_AERIS
-          ? Number(point.methane || 0)
-          : Number.isFinite(Number(point.purway))
-            ? Number(point.purway)
-            : Number(point.methane || 0);
+      const useTargetCoordinates = point.payload?.map_coordinates === "target";
+      const displayLatitude = useTargetCoordinates
+        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
+        : point.latitude;
+      const displayLongitude = useTargetCoordinates
+        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
+        : point.longitude;
+      const traceDisplayMetric = getTraceDisplayMetric(point);
+      const traceValue = traceDisplayMetric.value;
 
       return {
         type: "Feature",
         geometry: {
           type: "Point",
-          coordinates: [point.longitude, point.latitude],
+          coordinates: [displayLongitude, displayLatitude],
         },
         properties: {
           id: `trace-${point.sampleOrder}`,
@@ -130,6 +180,9 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           sensorMode: point.sensorMode,
           ch4: point.methane,
           methane: traceValue,
+          displayMetricLabel: traceDisplayMetric.label,
+          displayMetricUnits: traceDisplayMetric.units,
+          mapCoordinates: useTargetCoordinates ? "target" : "drone",
           detected: traceValue > 0,
           pointColor: traceValue > 0 ? "#4ade80" : "#64748b",
         },
@@ -487,6 +540,9 @@ export function ResultsPage({
     useState(false);
   const [isDeleteMode, setIsDeleteMode] = useState(false);
   const [deletingMissionId, setDeletingMissionId] = useState(null);
+  const [isDeletingAllData, setIsDeletingAllData] = useState(false);
+  const [isDeleteAllHolding, setIsDeleteAllHolding] = useState(false);
+  const [deleteAllHoldProgress, setDeleteAllHoldProgress] = useState(0);
   const [legendScale, setLegendScale] = useState({
     lowerLimit: 0,
     upperLimit: 5,
@@ -495,6 +551,7 @@ export function ResultsPage({
   const isPlumeViewEnabled = plumeViewByMission[selectedMissionId] ?? false;
   const [heatmapViewByMission, setHeatmapViewByMission] = useState({});
   const isHeatmapEnabled = heatmapViewByMission[selectedMissionId] ?? true;
+  const [traceOpacity, setTraceOpacity] = useState(1);
   const [isReplayPlaying, setIsReplayPlaying] = useState(false);
   const [isAnalyzeModalOpen, setIsAnalyzeModalOpen] = useState(false);
   const [isNotebookRunning, setIsNotebookRunning] = useState(false);
@@ -508,6 +565,8 @@ export function ResultsPage({
   });
   const replayTimerRef = useRef(null);
   const replayEndIndexRef = useRef(0);
+  const deleteAllHoldTimeoutRef = useRef(null);
+  const deleteAllHoldIntervalRef = useRef(null);
   const [csvModalFile, setCsvModalFile] = useState(null);
   const [importMessage, setImportMessage] = useState(null);
 
@@ -1128,6 +1187,78 @@ export function ResultsPage({
     setDeletingMissionId(null);
   };
 
+  const clearDeleteAllHold = useCallback(() => {
+    if (deleteAllHoldTimeoutRef.current) {
+      window.clearTimeout(deleteAllHoldTimeoutRef.current);
+      deleteAllHoldTimeoutRef.current = null;
+    }
+
+    if (deleteAllHoldIntervalRef.current) {
+      window.clearInterval(deleteAllHoldIntervalRef.current);
+      deleteAllHoldIntervalRef.current = null;
+    }
+  }, []);
+
+  const cancelDeleteAllHold = useCallback(() => {
+    clearDeleteAllHold();
+    setIsDeleteAllHolding(false);
+    setDeleteAllHoldProgress(0);
+  }, [clearDeleteAllHold]);
+
+  const handleDeleteAllRecordedData = useCallback(async () => {
+    if (isDeletingAllData) {
+      return;
+    }
+
+    setIsDeletingAllData(true);
+    const deleted = await deleteAllData();
+
+    if (deleted) {
+      setMissionsSample([]);
+      setTelemetryHistorySample([]);
+      setTelemetryHistoryRange({ from: "", to: "" });
+      setSelectedMissionId(ALL_DATA_MISSION_ID);
+      setSelectedResultDroneId(ALL_DRONES_OPTION);
+      setImportMessage("All recorded data deleted.");
+    }
+
+    setIsDeletingAllData(false);
+    setIsDeleteAllHolding(false);
+    setDeleteAllHoldProgress(0);
+  }, [isDeletingAllData]);
+
+  const beginDeleteAllHold = useCallback(() => {
+    if (isDeletingAllData || isTelemetryHistoryLoading) {
+      return;
+    }
+
+    clearDeleteAllHold();
+    setImportMessage(null);
+    setIsDeleteAllHolding(true);
+    setDeleteAllHoldProgress(0);
+    const startedAt = Date.now();
+
+    deleteAllHoldIntervalRef.current = window.setInterval(() => {
+      const elapsedMs = Date.now() - startedAt;
+      setDeleteAllHoldProgress(
+        Math.min(100, (elapsedMs / DELETE_ALL_HOLD_MS) * 100),
+      );
+    }, 50);
+
+    deleteAllHoldTimeoutRef.current = window.setTimeout(() => {
+      clearDeleteAllHold();
+      setDeleteAllHoldProgress(100);
+      void handleDeleteAllRecordedData();
+    }, DELETE_ALL_HOLD_MS);
+  }, [
+    clearDeleteAllHold,
+    handleDeleteAllRecordedData,
+    isDeletingAllData,
+    isTelemetryHistoryLoading,
+  ]);
+
+  useEffect(() => () => clearDeleteAllHold(), [clearDeleteAllHold]);
+
   const handleRunNotebookAnalysis = useCallback(async (tracerRates = {}) => {
     setIsAnalyzeModalOpen(true);
     setIsNotebookRunning(true);
@@ -1647,6 +1778,45 @@ export function ResultsPage({
                   Clear Range
                 </button>
               </div>
+              <div className="mt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  onPointerDown={beginDeleteAllHold}
+                  onPointerUp={cancelDeleteAllHold}
+                  onPointerLeave={cancelDeleteAllHold}
+                  onPointerCancel={cancelDeleteAllHold}
+                  disabled={isDeletingAllData || isTelemetryHistoryLoading}
+                  className="relative overflow-hidden rounded-md px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
+                  style={{
+                    backgroundColor: color.surface,
+                    border: `1px solid ${color.border}`,
+                    color: isDeleteAllHolding ? color.red : color.textDim,
+                    opacity: isDeleteAllHolding || isDeletingAllData ? 0.95 : 0.28,
+                    transition: "opacity 160ms ease, color 160ms ease",
+                  }}
+                  aria-label="Hold for 2 seconds to delete all recorded data"
+                  title="Hold for 2 seconds to delete all recorded data"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-y-0 left-0"
+                    style={{
+                      width: `${deleteAllHoldProgress}%`,
+                      backgroundColor: "rgba(239, 68, 68, 0.18)",
+                      transition: isDeleteAllHolding
+                        ? "none"
+                        : "width 160ms ease",
+                    }}
+                  />
+                  <span className="relative z-10">
+                    {isDeletingAllData
+                      ? "Deleting All Data"
+                      : isDeleteAllHolding
+                        ? `Hold ${Math.max(0, (DELETE_ALL_HOLD_MS - (deleteAllHoldProgress / 100) * DELETE_ALL_HOLD_MS) / 1000).toFixed(1)}s`
+                        : "Delete All Data"}
+                  </span>
+                </button>
+              </div>
             </div>
 
             {savedMissions.length ? (
@@ -2156,6 +2326,7 @@ export function ResultsPage({
                 resultsPageMode={true}
                 heatmapEnabled={isHeatmapEnabled}
                 plumeViewEnabled={isPlumeViewEnabled}
+                traceOpacity={traceOpacity}
                 onPlumeViewAutoChange={(enabled) => {
                   if (!selectedMissionId) {
                     return;
@@ -2174,6 +2345,7 @@ export function ResultsPage({
                 }}
               />
             </div>
+            <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />
 
             <div
               className="mt-3 grid grid-cols-3 gap-2 text-xs"

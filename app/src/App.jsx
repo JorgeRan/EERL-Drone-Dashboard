@@ -73,6 +73,76 @@ const fallbackMaxSelectablePpm = Math.max(
   ...flowChartData.map((point) => getTelemetryPeakValue([point])),
 );
 
+const getTelemetryCoordinate = (source, axis) => {
+  if (axis === "latitude") {
+    return (
+      toFiniteNumber(source?.latitude) ??
+      toFiniteNumber(source?.position?.latitude) ??
+      toFiniteNumber(source?.position?.lat) ??
+      null
+    );
+  }
+
+  if (axis === "longitude") {
+    return (
+      toFiniteNumber(source?.longitude) ??
+      toFiniteNumber(source?.position?.longitude) ??
+      toFiniteNumber(source?.position?.lon) ??
+      toFiniteNumber(source?.position?.lng) ??
+      null
+    );
+  }
+
+  return (
+    toFiniteNumber(source?.altitude) ??
+    toFiniteNumber(source?.position?.altitude) ??
+    toFiniteNumber(source?.position?.alt) ??
+    0
+  );
+};
+
+const getTelemetryWindComponent = (payload, axis) =>
+  toFiniteNumber(payload?.[`wind_${axis}`]) ??
+  toFiniteNumber(payload?.wind_direction?.[axis]) ??
+  0;
+
+const getTraceDisplayMetric = (point) => {
+  if (point.sensorMode === SENSOR_MODE_AERIS) {
+    const aerisCandidates = [
+      { label: "CH4", units: "ppm", value: toFiniteNumber(point.methane) },
+      {
+        label: "Acetylene",
+        units: "ppm",
+        value: toFiniteNumber(point.acetylene),
+      },
+      {
+        label: "Nitrous Oxide",
+        units: "ppm",
+        value: toFiniteNumber(point.nitrousOxide),
+      },
+    ].filter((candidate) => candidate.value !== null && candidate.value > 0);
+
+    if (aerisCandidates.length) {
+      return aerisCandidates.reduce((best, candidate) =>
+        candidate.value > best.value ? candidate : best,
+      );
+    }
+
+    return { label: "CH4", units: "ppm", value: 0 };
+  }
+
+  const purway = toFiniteNumber(point.purway);
+  if (purway !== null) {
+    return { label: "Purway", units: "ppm-m", value: Math.max(0, purway) };
+  }
+
+  return {
+    label: "CH4",
+    units: "ppm",
+    value: Math.max(0, toFiniteNumber(point.methane) ?? 0),
+  };
+};
+
 const buildFlowDataFromHistory = (historyRows) => {
   const sortedRows = [...historyRows].sort(
     (a, b) => new Date(a.ts || 0).getTime() - new Date(b.ts || 0).getTime(),
@@ -98,12 +168,12 @@ const buildFlowDataFromHistory = (historyRows) => {
       methane: metrics.methane,
       acetylene: metrics.acetylene,
       nitrousOxide: metrics.nitrousOxide,
-      altitude: toFiniteNumber(row.altitude) ?? 0,
-      latitude: toFiniteNumber(row.latitude),
-      longitude: toFiniteNumber(row.longitude),
-      wind_u: toFiniteNumber(payload.wind_u) ?? 0,
-      wind_v: toFiniteNumber(payload.wind_v) ?? 0,
-      wind_w: toFiniteNumber(payload.wind_w) ?? 0,
+      altitude: getTelemetryCoordinate(row, "altitude"),
+      latitude: getTelemetryCoordinate(row, "latitude"),
+      longitude: getTelemetryCoordinate(row, "longitude"),
+      wind_u: getTelemetryWindComponent(payload, "x"),
+      wind_v: getTelemetryWindComponent(payload, "y"),
+      wind_w: getTelemetryWindComponent(payload, "z"),
       distance: row.distance ?? null,
       payload,
     };
@@ -130,12 +200,12 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
     methane: metrics.methane,
     acetylene: metrics.acetylene,
     nitrousOxide: metrics.nitrousOxide,
-    altitude: toFiniteNumber(telemetryRow.altitude) ?? 0,
-    latitude: toFiniteNumber(telemetryRow.latitude),
-    longitude: toFiniteNumber(telemetryRow.longitude),
-    wind_u: toFiniteNumber(payload.wind_u) ?? 0,
-    wind_v: toFiniteNumber(payload.wind_v) ?? 0,
-    wind_w: toFiniteNumber(payload.wind_w) ?? 0,
+    altitude: getTelemetryCoordinate(telemetryRow, "altitude"),
+    latitude: getTelemetryCoordinate(telemetryRow, "latitude"),
+    longitude: getTelemetryCoordinate(telemetryRow, "longitude"),
+    wind_u: getTelemetryWindComponent(payload, "x"),
+    wind_v: getTelemetryWindComponent(payload, "y"),
+    wind_w: getTelemetryWindComponent(payload, "z"),
     distance: telemetryRow.distance ?? null,
     payload,
   };
@@ -144,23 +214,33 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
 const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
   type: "FeatureCollection",
   features: filterCoordinateOutliers(datasetFlowData)
-    .filter(
-      (point) =>
-        Number.isFinite(point.latitude) && Number.isFinite(point.longitude),
-    )
+    .filter((point) => {
+      const useTargetCoordinates = point.payload?.map_coordinates === "target";
+      const latitude = useTargetCoordinates
+        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
+        : point.latitude;
+      const longitude = useTargetCoordinates
+        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
+        : point.longitude;
+
+      return Number.isFinite(latitude) && Number.isFinite(longitude);
+    })
     .map((point) => {
-      const traceValue =
-        point.sensorMode === SENSOR_MODE_AERIS
-          ? Number(point.methane || 0)
-          : Number.isFinite(Number(point.purway))
-            ? Number(point.purway)
-            : Number(point.methane || 0);
+      const useTargetCoordinates = point.payload?.map_coordinates === "target";
+      const displayLatitude = useTargetCoordinates
+        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
+        : point.latitude;
+      const displayLongitude = useTargetCoordinates
+        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
+        : point.longitude;
+      const traceDisplayMetric = getTraceDisplayMetric(point);
+      const traceValue = traceDisplayMetric.value;
 
       return {
         type: "Feature",
         geometry: {
           type: "Point",
-          coordinates: [point.longitude, point.latitude],
+          coordinates: [displayLongitude, displayLatitude],
         },
         properties: {
           id: `trace-${point.sampleOrder}`,
@@ -177,6 +257,9 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           sensorMode: point.sensorMode,
           ch4: point.methane,
           methane: traceValue,
+          displayMetricLabel: traceDisplayMetric.label,
+          displayMetricUnits: traceDisplayMetric.units,
+          mapCoordinates: useTargetCoordinates ? "target" : "drone",
           detected: traceValue > 0,
           pointColor: traceValue > 0 ? "#4ade80" : "#64748b",
         },
@@ -503,8 +586,11 @@ function App() {
   }, [liveFlowData, maxSelectablePpm]);
 
   const activeTraceDataset = useMemo(
-    () => buildTraceDatasetFromFlowData(measurementTraceData),
-    [measurementTraceData],
+    () =>
+      buildTraceDatasetFromFlowData(
+        measurementTraceData.length > 0 ? measurementTraceData : liveFlowData,
+      ),
+    [measurementTraceData, liveFlowData],
   );
 
   const filteredTraceDataset = useMemo(

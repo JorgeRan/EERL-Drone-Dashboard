@@ -15,7 +15,34 @@ const normalizeHeader = (value) =>
   String(value ?? "")
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, "_");
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/[^a-z0-9._]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const parseGpsDateTime = (rawDate, rawTime) => {
+  const dateValue = String(rawDate ?? "").trim();
+  const timeValue = String(rawTime ?? "").trim();
+
+  const dateMatch = dateValue.match(/^(\d{4})(\d{2})(\d{2})$/);
+  const timeMatch = timeValue.match(/^(\d{2})(\d{2})(\d{2})(?:\.(\d{1,3}))?$/);
+
+  if (!dateMatch || !timeMatch) {
+    return null;
+  }
+
+  const [, year, month, day] = dateMatch;
+  const [, hours, minutes, seconds, fractional = "0"] = timeMatch;
+  const milliseconds = String(fractional).padEnd(3, "0").slice(0, 3);
+  const timestampIso = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${milliseconds}Z`;
+  const timestampMs = new Date(timestampIso).getTime();
+
+  if (!Number.isFinite(timestampMs)) {
+    return null;
+  }
+
+  return { timestampIso, timestampMs };
+};
 
 const detectDelimiter = (headerLine) => {
   const semicolonCount = (headerLine.match(/;/g) || []).length;
@@ -116,42 +143,74 @@ const parseStandardCsvToMissionResults = (
   };
 
   const timeIdx = idx("time", "timestamp", "ts");
+  const gpsDateIdx = idx("gps_date");
+  const gpsTimeIdx = idx("gps_time");
   const methaneIdx = idx("methane_concentration", "methane", "ch4");
   const acetyleneIdx = idx("acetylene", "c2h2");
   const ethyleneIdx = idx("ethylene", "c2h4", "nitrous_oxide", "n2o");
-  const snifferIdx = idx("sniffer", "sniffer_ppm");
+  const snifferIdx = idx("sniffer", "sniffer_ppm", "sniffer_methane");
   const purwayIdx = idx("purway", "purway_ppm_m", "purway_ppn", "purway_ppm");
-  const latIdx = idx("latitude", "lat");
-  const lonIdx = idx("longitude", "lon", "lng");
-  const altIdx = idx("altitude", "alt");
+  const latIdx = idx("rtk_lat", "latitude", "lat", "center_lat", "gimbal_lat", "ref_lat");
+  const lonIdx = idx("rtk_lon", "longitude", "lon", "lng", "center_lon", "gimbal_lon", "ref_lon");
+  const altIdx = idx("rtk_hfsl", "altitude", "alt", "center_hfsl", "gimbal_hfsl", "ref_hfsl");
   const distIdx = idx("distance");
-  const targetLatIdx = idx("dest_latitude", "target_latitude");
-  const targetLonIdx = idx("dest_longitude", "target_longitude");
-  const speedIdx = idx("speed", "spd", "ground_speed");
+  const targetLatIdx = idx("dest_latitude", "target_latitude", "targ_lat", "targ_ref_lat", "Targ Lat [deg]");
+  const targetLonIdx = idx("dest_longitude", "target_longitude", "targ_lon", "targ_ref_lon", "Targ Lon [deg]");
+  const speedIdx = idx("speed", "spd", "ground_speed", "windc_vel");
   const windUIdx = idx("wind_u", "u_wind", "u");
   const windVIdx = idx("wind_v", "v_wind", "v");
   const windWIdx = idx("wind_w", "w_wind", "w");
   const droneIdx = idx("drone", "drone_id", "droneid");
   const sensorModeIdx = idx("sensor_mode", "sensor_type", "sensor");
 
-  if (timeIdx === -1) return null;
+  if (timeIdx === -1 && (gpsDateIdx === -1 || gpsTimeIdx === -1)) return null;
+
+  const usesPurwayMethaneColumn =
+    defaultSensorMode === SENSOR_MODE_DUAL &&
+    methaneIdx !== -1 &&
+    snifferIdx !== -1 &&
+    purwayIdx === -1;
 
   const rowsByDrone = new Map();
   let previousTimestampMs = null;
 
   for (const line of lines.slice(1)) {
     const cols = splitDelimitedLine(line, detectDelimiter(lines[0]));
-    const ts = parseTimestamp(cols[timeIdx], {
-      ...parseOptions,
-      lastTimestampMs: previousTimestampMs,
-    });
+    const ts =
+      (timeIdx !== -1
+        ? parseTimestamp(cols[timeIdx], {
+            ...parseOptions,
+            lastTimestampMs: previousTimestampMs,
+          })
+        : null) ||
+      parseGpsDateTime(
+        gpsDateIdx !== -1 ? cols[gpsDateIdx] : null,
+        gpsTimeIdx !== -1 ? cols[gpsTimeIdx] : null,
+      );
     if (!ts) continue;
     previousTimestampMs = ts.timestampMs;
 
-    const methane =
-      methaneIdx !== -1 ? (parseNumber(cols[methaneIdx]) ?? 0) : 0;
     const sniffer = snifferIdx !== -1 ? parseNumber(cols[snifferIdx]) : null;
-    const purway = purwayIdx !== -1 ? parseNumber(cols[purwayIdx]) : null;
+    const methaneColumnValue =
+      methaneIdx !== -1 ? parseNumber(cols[methaneIdx]) : null;
+    const purway =
+      purwayIdx !== -1
+        ? parseNumber(cols[purwayIdx])
+        : usesPurwayMethaneColumn
+          ? methaneColumnValue
+          : null;
+    const methane = usesPurwayMethaneColumn
+      ? sniffer ?? 0
+      : methaneColumnValue ?? sniffer ?? 0;
+
+    const droneLatitude = latIdx !== -1 ? parseNumber(cols[latIdx]) : null;
+    const droneLongitude = lonIdx !== -1 ? parseNumber(cols[lonIdx]) : null;
+    const targetLatitude =
+      targetLatIdx !== -1 ? parseNumber(cols[targetLatIdx]) : null;
+    const targetLongitude =
+      targetLonIdx !== -1 ? parseNumber(cols[targetLonIdx]) : null;
+    const useTargetCoordinates =
+      targetLatitude !== null && targetLongitude !== null;
 
     const point = {
       timestampIso: ts.timestampIso,
@@ -167,18 +226,23 @@ const parseStandardCsvToMissionResults = (
       ethylene: ethyleneIdx !== -1 ? parseNumber(cols[ethyleneIdx]) : null,
       sniffer,
       purway,
-      latitude: latIdx !== -1 ? parseNumber(cols[latIdx]) : null,
-      longitude: lonIdx !== -1 ? parseNumber(cols[lonIdx]) : null,
+      latitude: droneLatitude,
+      longitude: droneLongitude,
       altitude: altIdx !== -1 ? parseNumber(cols[altIdx]) : null,
       distance: distIdx !== -1 ? parseNumber(cols[distIdx]) : null,
       speed: speedIdx !== -1 ? parseNumber(cols[speedIdx]) : null,
-      target_latitude:
-        targetLatIdx !== -1 ? parseNumber(cols[targetLatIdx]) : null,
-      target_longitude:
-        targetLonIdx !== -1 ? parseNumber(cols[targetLonIdx]) : null,
+      target_latitude: targetLatitude,
+      target_longitude: targetLongitude,
       wind_u: windUIdx !== -1 ? parseNumber(cols[windUIdx]) : null,
       wind_v: windVIdx !== -1 ? parseNumber(cols[windVIdx]) : null,
       wind_w: windWIdx !== -1 ? parseNumber(cols[windWIdx]) : null,
+      payload: {
+        source_latitude: droneLatitude,
+        source_longitude: droneLongitude,
+        target_latitude: targetLatitude,
+        target_longitude: targetLongitude,
+        map_coordinates: useTargetCoordinates ? "target" : "drone",
+      },
     };
 
     const droneId =

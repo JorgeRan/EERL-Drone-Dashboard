@@ -1,4 +1,3 @@
-import { json } from 'express';
 import mqtt from 'mqtt';
 
 const sourceBrokerUrl = 'mqtt://broker.hivemq.com:1883';
@@ -9,9 +8,14 @@ let  targetTopic = 'DroneData';
 const targetTopics = ['M350/data', 'M400-1/data', 'M400-2/data'];
 const targetUsername = 'EERL-MQTT';
 const targetPassword = 'CH4Drone';
-const targetRetain = 'true';
-const verifyTarget = 'false';
+const targetRetain = true;
+const verifyTarget = false;
 const targetUrl = new URL(targetBrokerUrl);
+const targetTopicByDrone = {
+  M350: targetTopics[0],
+  'M400-1': targetTopics[1],
+  'M400-2': targetTopics[2],
+};
 
 const relayQueue = [];
 const maxQueueSize = Number(process.env.MAX_QUEUE_SIZE || 1000);
@@ -32,26 +36,66 @@ const targetClient = mqtt.connect(targetBrokerUrl, {
   servername: targetUrl.hostname,
 });
 
-function publishToTarget(entry) {
-  
-  let jsonObject = JSON.parse(entry.payload);
-  console.log(jsonObject);
-  if (jsonObject ['drone'] == 'M350') {
-    targetTopic = targetTopics[0];
-  } else if (jsonObject['drone'] == 'M400-1') {
-    targetTopic = targetTopics[1];
-  } else if (jsonObject['drone'] == 'M400-2') {
-    targetTopic = targetTopics[2];
+function resolveTargetTopic(droneId) {
+  if (typeof droneId !== 'string') {
+    return targetTopic;
   }
-  
-  targetClient.publish(targetTopic, entry.payload, { qos: 1, retain: targetRetain }, (error) => {
-    if (error) {
-      console.error('Target publish failed:', error.message);
-      relayQueue.unshift(entry);
-      return;
-    }
 
-    console.log(`Relayed message to ${targetTopic} (${entry.payload.length} bytes)`);
+  return targetTopicByDrone[droneId.trim()] || targetTopic;
+}
+
+function parseRelayMessages(payloadBuffer) {
+  const payloadText = Buffer.isBuffer(payloadBuffer)
+    ? payloadBuffer.toString('utf8')
+    : String(payloadBuffer);
+  const parsedPayload = JSON.parse(payloadText);
+  const messages = Array.isArray(parsedPayload) ? parsedPayload : [parsedPayload];
+
+  return messages.filter(
+    (message) => message && typeof message === 'object' && !Array.isArray(message),
+  );
+}
+
+function publishSingleMessage(message, originalEntry) {
+  const resolvedTopic = resolveTargetTopic(message.drone);
+  const serializedPayload = JSON.stringify(message);
+
+  targetClient.publish(
+    resolvedTopic,
+    serializedPayload,
+    { qos: 1, retain: targetRetain },
+    (error) => {
+      if (error) {
+        console.error('Target publish failed:', error.message);
+        relayQueue.unshift(originalEntry);
+        return;
+      }
+
+      console.log(
+        `Relayed message to ${resolvedTopic} (${serializedPayload.length} bytes)`,
+      );
+    },
+  );
+}
+
+function publishToTarget(entry) {
+  let relayMessages;
+
+  try {
+    relayMessages = parseRelayMessages(entry.payload);
+  } catch (error) {
+    console.error('Failed to parse source payload as JSON:', error.message);
+    return;
+  }
+
+  if (!relayMessages.length) {
+    console.warn('Source payload contained no relayable telemetry objects');
+    return;
+  }
+
+  relayMessages.forEach((message) => {
+    console.log(message);
+    publishSingleMessage(message, entry);
   });
 }
 
@@ -110,13 +154,15 @@ targetClient.on('connect', () => {
   console.log(`Target connected: ${targetBrokerUrl}`);
 
   if (verifyTarget) {
-    targetClient.subscribe(targetTopic, { qos: 1 }, (error) => {
-      if (error) {
-        console.error(`Target verification subscribe failed for ${targetTopic}:`, error.message);
-        return;
-      }
+    targetTopics.forEach((topicName) => {
+      targetClient.subscribe(topicName, { qos: 1 }, (error) => {
+        if (error) {
+          console.error(`Target verification subscribe failed for ${topicName}:`, error.message);
+          return;
+        }
 
-      console.log(`Target verification subscribed: ${targetTopic}`);
+        console.log(`Target verification subscribed: ${topicName}`);
+      });
     });
   }
 

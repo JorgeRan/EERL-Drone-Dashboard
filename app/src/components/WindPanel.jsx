@@ -2,31 +2,21 @@ import React, { useMemo } from "react";
 import { tw, color } from "../constants/tailwind";
 import { Chart, calculateWindRose, classifyDir } from "@eunchurn/react-windrose";
 
-const fallbackWindSamples = [
-  { u: 1.4, v: -3.8, w: 0.2 },
-  { u: 1.9, v: -4.1, w: 0.4 },
-  { u: 2.2, v: -4.6, w: 0.5 },
-  { u: 2.8, v: -5.0, w: 0.3 },
-  { u: 3.1, v: -5.2, w: 0.1 },
-  { u: 2.5, v: -4.4, w: -0.2 },
-  { u: 1.7, v: -3.7, w: -0.3 },
-  { u: 0.9, v: -2.8, w: -0.1 },
-  { u: -0.6, v: -2.0, w: 0.0 },
-  { u: -1.2, v: -1.4, w: 0.2 },
-  { u: -2.0, v: -0.9, w: 0.5 },
-  { u: -2.4, v: -0.2, w: 0.7 },
-  { u: -1.6, v: 0.6, w: 0.4 },
-  { u: -0.8, v: 1.1, w: 0.1 },
-  { u: 0.5, v: 0.8, w: -0.2 },
-  { u: 1.0, v: -0.7, w: -0.4 },
-];
-
 const windColumns = ["angle", "0-1", "1-2", "2-3", "3-4", "4-5", "5-6", "6-7", "7+"];
 const primaryAngles = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 
-export function WindPanel({ windSamples = fallbackWindSamples }) {
-  const { chartData, prevailingDirection, averageSpeed, peakSpeed, averageVertical } = useMemo(() => {
-    if (!windSamples.length) {
+export function WindPanel({ windSamples = [] }) {
+  const validWindSamples = useMemo(
+    () =>
+      (Array.isArray(windSamples) ? windSamples : []).filter(
+        ({ u, v, w }) =>
+          Number.isFinite(u) || Number.isFinite(v) || Number.isFinite(w),
+      ),
+    [windSamples],
+  );
+
+  const { chartData, prevailingDirection, averageSpeed, peakSpeed } = useMemo(() => {
+    if (!validWindSamples.length) {
       return {
         chartData: [],
         prevailingDirection: "N",
@@ -36,8 +26,10 @@ export function WindPanel({ windSamples = fallbackWindSamples }) {
       };
     }
 
-    const speed = windSamples.map(({ u, v }) => Math.sqrt(u * u + v * v));
-    const direction = windSamples.map(({ u, v }) => {
+    const speed = validWindSamples.map(({ u, v }) =>
+      Math.sqrt((u ?? 0) * (u ?? 0) + (v ?? 0) * (v ?? 0)),
+    );
+    const direction = validWindSamples.map(({ u, v }) => {
       return (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
     });
 
@@ -57,9 +49,11 @@ export function WindPanel({ windSamples = fallbackWindSamples }) {
       prevailingDirection: prevailing?.angle || classifyDir(direction[0] || 0),
       averageSpeed: speed.reduce((sum, value) => sum + value, 0) / speed.length,
       peakSpeed: Math.max(...speed),
-      averageVertical: windSamples.reduce((sum, sample) => sum + sample.w, 0) / windSamples.length,
+      averageVertical:
+        validWindSamples.reduce((sum, sample) => sum + (sample.w ?? 0), 0) /
+        validWindSamples.length,
     };
-  }, []);
+  }, [validWindSamples]);
 
   return (
     <div className={tw.panel} style={{ backgroundColor: color.card, padding: "0.75rem" }}>
@@ -75,9 +69,14 @@ export function WindPanel({ windSamples = fallbackWindSamples }) {
           </div>
           <div
             className="rounded-full px-3 py-1 text-xs font-medium"
-            style={{ backgroundColor: color.greenSoft, color: color.green }}
+            style={{
+              backgroundColor: validWindSamples.length
+                ? color.greenSoft
+                : color.surface,
+              color: validWindSamples.length ? color.green : color.textMuted,
+            }}
           >
-            Live
+            {validWindSamples.length ? "Live" : "No Wind Data"}
           </div>
         </div>
 
@@ -123,15 +122,21 @@ export function WindPanel({ windSamples = fallbackWindSamples }) {
           className="flex min-h-[300px] h-full w-full items-center justify-center rounded-xl border m-0 p-0"
           style={{ backgroundColor: color.surface, borderColor: color.border }}
         >
-          <div className="w-full h-full max-w-[360px] [&_svg_text]:fill-white [&_svg_text]:opacity-100 m-0 p-0">
-            <Chart
-              chartData={chartData}
-              columns={windColumns}
-              width={360}
-              height={360}
-              legendGap={14}
-            />
-          </div>
+          {validWindSamples.length ? (
+            <div className="w-full h-full max-w-[360px] [&_svg_text]:fill-white [&_svg_text]:opacity-100 m-0 p-0">
+              <Chart
+                chartData={chartData}
+                columns={windColumns}
+                width={360}
+                height={360}
+                legendGap={14}
+              />
+            </div>
+          ) : (
+            <p className="px-6 text-center text-sm" style={{ color: color.textMuted }}>
+              Waiting for live wind telemetry to render the wind rose.
+            </p>
+          )}
         </div>
       </div>
     </div>

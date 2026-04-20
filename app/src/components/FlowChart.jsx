@@ -31,7 +31,7 @@ const chartFrame = {
   top: 72,
   bottom: 34,
   left: 52,
-  right: 12,
+  right: 52,
 };
 
 function formatDuration(durationMs) {
@@ -96,15 +96,18 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const dragHandleRef = useRef(null);
   const dataLength = flowData.length;
   const maxIndex = Math.max(dataLength - 1, 0);
-  const fullPeakValue = Math.max(
+  const leftAxisPeakValue = Math.max(
     1,
-    ...flowData.map((point) => point.sniffer),
     ...flowData.map((point) => point.purway),
     ...flowData.map((point) => point.methane),
   );
+  const rightAxisPeakValue = Math.max(
+    1,
+    ...flowData.map((point) => point.sniffer),
+  );
   const safeSelection = useMemo(
-    () => clampSelection(selection, dataLength, fullPeakValue),
-    [selection, dataLength, fullPeakValue],
+    () => clampSelection(selection, dataLength, leftAxisPeakValue),
+    [selection, dataLength, leftAxisPeakValue],
   );
   const windowedData = useMemo(
     () => flowData.slice(safeSelection.startIndex, safeSelection.endIndex + 1),
@@ -124,33 +127,40 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
     windowedData[windowedData.length - 1] ??
     flowData[dataLength - 1] ??
     { sniffer: 0, purway: 0, methane: 0 };
-  const fullTicks = [
+  const leftAxisTicks = [
     0,
-    Math.ceil(fullPeakValue * 0.35),
-    Math.ceil(fullPeakValue * 0.7),
-    Math.ceil(fullPeakValue),
+    Math.ceil(leftAxisPeakValue * 0.35),
+    Math.ceil(leftAxisPeakValue * 0.7),
+    Math.ceil(leftAxisPeakValue),
+  ];
+  const rightAxisTicks = [
+    0,
+    Math.ceil(rightAxisPeakValue * 0.35),
+    Math.ceil(rightAxisPeakValue * 0.7),
+    Math.ceil(rightAxisPeakValue),
   ];
   const startPercent =
     maxIndex > 0 ? (safeSelection.startIndex / maxIndex) * 100 : 0;
   const endPercent =
     maxIndex > 0 ? (safeSelection.endIndex / maxIndex) * 100 : 100;
   const ppmMinPercent =
-    fullPeakValue > 0
-      ? 100 - (safeSelection.ppmMin / fullPeakValue) * 100
+    leftAxisPeakValue > 0
+      ? 100 - (safeSelection.ppmMin / leftAxisPeakValue) * 100
       : 100;
   const ppmMaxPercent =
-    fullPeakValue > 0 ? 100 - (safeSelection.ppmMax / fullPeakValue) * 100 : 0;
+    leftAxisPeakValue > 0
+      ? 100 - (safeSelection.ppmMax / leftAxisPeakValue) * 100
+      : 0;
   const windowStart = windowedData[0];
   const windowEnd = windowedData[windowedData.length - 1];
-  const selectedSampleCount = filteredData.length;
   const deltaTime = formatDuration(
     (windowEnd?.timestampMs ?? 0) - (windowStart?.timestampMs ?? 0),
   );
 
   useEffect(() => {
     const minimumPpmBand = Math.min(
-      Math.max(fullPeakValue * 0.02, 0.1),
-      fullPeakValue,
+      Math.max(leftAxisPeakValue * 0.02, 0.1),
+      leftAxisPeakValue,
     );
 
     const updateTimeSelectionFromClientX = (clientX) => {
@@ -180,7 +190,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
     };
 
     const updatePpmSelectionFromClientY = (clientY) => {
-      if (!ppmRangeRef.current || fullPeakValue <= 0) {
+      if (!ppmRangeRef.current || leftAxisPeakValue <= 0) {
         return;
       }
 
@@ -189,7 +199,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
         0,
         Math.min(1 - (clientY - bounds.top) / bounds.height, 1),
       );
-      const nextPpm = Number((clampedRatio * fullPeakValue).toFixed(2));
+      const nextPpm = Number((clampedRatio * leftAxisPeakValue).toFixed(2));
 
       if (dragHandleRef.current?.handle === "ppmMin") {
         onSelectionChange({
@@ -230,7 +240,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       window.removeEventListener("pointerup", handlePointerUp);
     };
   }, [
-    fullPeakValue,
+    leftAxisPeakValue,
     maxIndex,
     onSelectionChange,
     safeSelection.endIndex,
@@ -267,17 +277,17 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       return;
     }
 
-    if (axis === "y" && ppmRangeRef.current && fullPeakValue > 0) {
+    if (axis === "y" && ppmRangeRef.current && leftAxisPeakValue > 0) {
       const minimumPpmBand = Math.min(
-        Math.max(fullPeakValue * 0.02, 0.1),
-        fullPeakValue,
+        Math.max(leftAxisPeakValue * 0.02, 0.1),
+        leftAxisPeakValue,
       );
       const bounds = ppmRangeRef.current.getBoundingClientRect();
       const clampedRatio = Math.max(
         0,
         Math.min(1 - (event.clientY - bounds.top) / bounds.height, 1),
       );
-      const nextPpm = Number((clampedRatio * fullPeakValue).toFixed(2));
+      const nextPpm = Number((clampedRatio * leftAxisPeakValue).toFixed(2));
 
       if (handle === "ppmMin") {
         onSelectionChange({
@@ -441,19 +451,39 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
                 minTickGap={24}
               />
               <YAxis
+                yAxisId="left"
                 stroke={color.textDim}
                 tickLine={false}
                 axisLine={{ stroke: color.borderStrong }}
                 width={44}
                 style={{ fontSize: "11px" }}
-                ticks={fullTicks}
+                ticks={leftAxisTicks}
                 tick={{ fill: color.text, fontSize: 11 }}
                 label={{
-                  value: "ppm",
+                  value: "Trace",
                   angle: -90,
                   position: "insideLeft",
                   offset: 0,
                   fill: color.text,
+                  fontSize: 11,
+                }}
+              />
+              <YAxis
+                yAxisId="right"
+                orientation="right"
+                stroke={seriesTheme.sniffer.stroke}
+                tickLine={false}
+                axisLine={{ stroke: color.borderStrong }}
+                width={44}
+                style={{ fontSize: "11px" }}
+                ticks={rightAxisTicks}
+                tick={{ fill: seriesTheme.sniffer.stroke, fontSize: 11 }}
+                label={{
+                  value: "Sniffer",
+                  angle: 90,
+                  position: "insideRight",
+                  offset: 0,
+                  fill: seriesTheme.sniffer.stroke,
                   fontSize: 11,
                 }}
               />
@@ -499,20 +529,22 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
                   ifOverflow="extendDomain"
                 />
               ) : null}
-              {safeSelection.ppmMax < fullPeakValue ? (
+              {safeSelection.ppmMax < leftAxisPeakValue ? (
                 <ReferenceArea
                   y1={safeSelection.ppmMax}
-                  y2={fullPeakValue}
+                  y2={leftAxisPeakValue}
                   fill="rgba(3, 7, 18, 0.44)"
                   ifOverflow="extendDomain"
                 />
               ) : null}
               {Object.entries(seriesTheme).map(([sensorKey, theme]) => {
                 const dataKey = sensorKey;
+                const yAxisId = sensorKey === "sniffer" ? "right" : "left";
 
                 return (
                   <React.Fragment key={sensorKey}>
                     <Area
+                      yAxisId={yAxisId}
                       type="monotone"
                       dataKey={dataKey}
                       stroke={theme.stroke}
@@ -524,6 +556,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
                       activeDot={{ r: 4, strokeWidth: 0, fill: theme.stroke }}
                     />
                     <Line
+                      yAxisId={yAxisId}
                       type="monotone"
                       dataKey={dataKey}
                       stroke={theme.stroke}

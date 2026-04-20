@@ -73,14 +73,15 @@ export function buildHeatmapWeightExpression(lowerLimit, upperLimit) {
 
     return [
         'interpolate',
-        ['linear'],
+        ['exponential', 2.2],
         ['get', 'methane'],
         lowerLimit, 0,
-        lowerLimit + span * 0.08, 0,
-        lowerLimit + span * 0.2, 0.16,
-        lowerLimit + span * 0.45, 0.44,
-        lowerLimit + span * 0.68, 0.74,
-        lowerLimit + span * 0.85, 0.92,
+        lowerLimit + span * 0.12, 0,
+        lowerLimit + span * 0.24, 0.06,
+        lowerLimit + span * 0.42, 0.18,
+        lowerLimit + span * 0.6, 0.42,
+        lowerLimit + span * 0.76, 0.72,
+        lowerLimit + span * 0.9, 0.94,
         upperLimit, 1,
     ]
 }

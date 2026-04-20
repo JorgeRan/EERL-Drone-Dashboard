@@ -214,6 +214,19 @@ export async function deleteMission(missionId) {
   }
 }
 
+export async function deleteAllData() {
+  try {
+    const response = await fetch(`${backendHttpUrl}/api/data`, {
+      method: "DELETE",
+      cache: "no-store",
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function runAerisAnalysis(payload) {
   try {
     const backendReady = await waitForBackendReady({

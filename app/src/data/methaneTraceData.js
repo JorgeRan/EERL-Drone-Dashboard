@@ -111,7 +111,18 @@ export function generateMethaneTraceDataset({ centerLat, centerLon, centerAlt, s
 }
 
 export function buildMethanePlumeDataset(traceDataset) {
-    const positiveFeatures = traceDataset.features.filter((feature) => feature.properties.methane > 0)
+    const positiveFeatures = traceDataset.features
+        .filter((feature) => feature.properties.methane > 0)
+        .sort((left, right) => {
+            const leftMethane = Number(left.properties?.methane ?? 0)
+            const rightMethane = Number(right.properties?.methane ?? 0)
+
+            if (leftMethane !== rightMethane) {
+                return leftMethane - rightMethane
+            }
+
+            return Number(left.properties?.sampleOrder ?? 0) - Number(right.properties?.sampleOrder ?? 0)
+        })
 
     if (positiveFeatures.length === 0) {
         return {
@@ -132,7 +143,7 @@ export function buildMethanePlumeDataset(traceDataset) {
             const lonOffset = metersToLongitudeDegrees(footprintRadiusMeters, sampleLat)
             const altitudeBand = altitude - minimumAltitude
             const baseHeight = 0
-            const plumeHeight = methane * 0.30
+            const plumeHeight = methane * 0.1
             // const plumeHeight = baseHeight + 10 + methane * 20
 
             return {
