@@ -6,20 +6,89 @@ const path = require('node:path');
 let bridgeProcess = null;
 let brokerProcess = null;
 
+function getAppContentPath(...relativePath) {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'app', ...relativePath);
+  }
+
+  return path.join(__dirname, '..', ...relativePath);
+}
+
+function getRuntimeLogPath(name) {
+  return path.join(app.getPath('userData'), `${name}.log`);
+}
+
+function appendRuntimeLog(name, message) {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.appendFileSync(
+      getRuntimeLogPath(name),
+      `[${new Date().toISOString()}] ${message}\n`,
+      'utf8',
+    );
+  } catch (error) {
+    console.error(`Failed to write ${name} log:`, error.message);
+  }
+}
+
 function getDevIconPath() {
   return path.join(__dirname, '..', 'build', 'icon.png');
 }
 
 function getBridgeScriptPath() {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'mqtt-bridge', 'bridge_to_hivemq_cloud.mjs');
-  }
-
-  return path.join(__dirname, '..', 'mqtt-bridge', 'bridge_to_hivemq_cloud.mjs');
+  return getAppContentPath('mqtt-bridge', 'bridge_to_hivemq_cloud.mjs');
 }
 
 function getBrokerScriptPath() {
-  return path.join(__dirname, '..', 'backend', 'MQTT-broker.js');
+  return getAppContentPath('backend', 'MQTT-broker.js');
+}
+
+function startManagedChildProcess({
+  name,
+  scriptPath,
+  extraEnv = {},
+}) {
+  if (!fs.existsSync(scriptPath)) {
+    const missingPathMessage = `${name} script not found: ${scriptPath}`;
+    console.error(missingPathMessage);
+    appendRuntimeLog(name, missingPathMessage);
+    return null;
+  }
+
+  appendRuntimeLog(name, `Starting process with script ${scriptPath}`);
+
+  const childProcess = spawn(process.execPath, [scriptPath], {
+    cwd: path.dirname(scriptPath),
+    env: {
+      ...process.env,
+      ...extraEnv,
+      ELECTRON_RUN_AS_NODE: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  childProcess.stdout?.on('data', (chunk) => {
+    appendRuntimeLog(name, `stdout: ${String(chunk).trimEnd()}`);
+  });
+
+  childProcess.stderr?.on('data', (chunk) => {
+    appendRuntimeLog(name, `stderr: ${String(chunk).trimEnd()}`);
+  });
+
+  childProcess.on('spawn', () => {
+    appendRuntimeLog(name, `Spawned pid=${childProcess.pid}`);
+  });
+
+  childProcess.on('exit', (code, signal) => {
+    appendRuntimeLog(name, `Exited code=${code} signal=${signal}`);
+  });
+
+  childProcess.on('error', (error) => {
+    appendRuntimeLog(name, `Failed to start: ${error.message}`);
+  });
+
+  return childProcess;
 }
 
 function startBridgeProcess() {
@@ -27,20 +96,14 @@ function startBridgeProcess() {
     return;
   }
 
-  const bridgeScriptPath = getBridgeScriptPath();
+  bridgeProcess = startManagedChildProcess({
+    name: 'mqtt-bridge',
+    scriptPath: getBridgeScriptPath(),
+  });
 
-  if (!fs.existsSync(bridgeScriptPath)) {
-    console.error('Bridge script not found:', bridgeScriptPath);
+  if (!bridgeProcess) {
     return;
   }
-
-  bridgeProcess = spawn(process.execPath, [bridgeScriptPath], {
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1'
-    },
-    stdio: 'inherit'
-  });
 
   bridgeProcess.on('exit', (code, signal) => {
     console.log(`Bridge process exited (code=${code}, signal=${signal})`);
@@ -66,21 +129,17 @@ function startBrokerProcess() {
     return;
   }
 
-  const brokerScriptPath = getBrokerScriptPath();
+  brokerProcess = startManagedChildProcess({
+    name: 'mqtt-broker',
+    scriptPath: getBrokerScriptPath(),
+    extraEnv: {
+      APP_DATA_DIR: app.getPath('userData'),
+    },
+  });
 
-  if (!fs.existsSync(brokerScriptPath)) {
-    console.error('Broker script not found:', brokerScriptPath);
+  if (!brokerProcess) {
     return;
   }
-
-  brokerProcess = spawn(process.execPath, [brokerScriptPath], {
-    env: {
-      ...process.env,
-      APP_DATA_DIR: app.getPath('userData'),
-      ELECTRON_RUN_AS_NODE: '1'
-    },
-    stdio: 'inherit'
-  });
 
   brokerProcess.on('exit', (code, signal) => {
     console.log(`Broker process exited (code=${code}, signal=${signal})`);
@@ -143,7 +202,7 @@ app.whenReady().then(() => {
     }
   }
 
-  startBridgeProcess();
+  // startBridgeProcess();
   startBrokerProcess();
   createWindow();
 
@@ -155,7 +214,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  stopBridgeProcess();
+  // stopBridgeProcess();
   stopBrokerProcess();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -163,6 +222,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  stopBridgeProcess();
+  // stopBridgeProcess();
   stopBrokerProcess();
 });

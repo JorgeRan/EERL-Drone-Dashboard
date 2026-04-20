@@ -90,6 +90,116 @@ const buildDroneFeatureCollection = (drones) => ({
     })),
 });
 
+const isAllDroneSelection = (selectedDroneId) => {
+  if (selectedDroneId == null) {
+    return true;
+  }
+
+  const normalizedValue = String(selectedDroneId).trim().toLowerCase();
+  return !normalizedValue || normalizedValue === "all" || normalizedValue === "all-data";
+};
+
+const buildTraceFlightPathFeatureCollection = (traceDataset) => {
+  const coordinates = [...(traceDataset?.features || [])]
+    .sort(
+      (left, right) =>
+        Number(left?.properties?.sampleOrder ?? 0) -
+        Number(right?.properties?.sampleOrder ?? 0),
+    )
+    .map((feature) => feature?.geometry?.coordinates)
+    .filter(
+      (coordinates) =>
+        Number.isFinite(Number(coordinates?.[0])) &&
+        Number.isFinite(Number(coordinates?.[1])),
+    );
+
+  if (coordinates.length < 2) {
+    return { type: "FeatureCollection", features: [] };
+  }
+
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates,
+        },
+        properties: {
+          id: "trace-flight-path",
+        },
+      },
+    ],
+  };
+};
+
+const buildLiveFlightPathFeatureCollection = (
+  droneTrackHistory,
+  selectedDroneId,
+) => {
+  const showAllDrones = isAllDroneSelection(selectedDroneId);
+  const features = Object.entries(droneTrackHistory || {})
+    .filter(([droneId, coordinates]) => {
+      if (!Array.isArray(coordinates) || coordinates.length < 2) {
+        return false;
+      }
+
+      return showAllDrones || droneId === selectedDroneId;
+    })
+    .map(([droneId, coordinates]) => ({
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates,
+      },
+      properties: {
+        id: `flight-path-${droneId}`,
+        droneId,
+      },
+    }));
+
+  return {
+    type: "FeatureCollection",
+    features,
+  };
+};
+
+const buildDisplayedTraceDataset = (traceDataset, showTargetMarkers) => ({
+  type: "FeatureCollection",
+  features: (traceDataset?.features || [])
+    .map((feature) => {
+      const properties = feature?.properties || {};
+      const sourceLongitude = toFiniteNumber(properties.sourceLongitude);
+      const sourceLatitude = toFiniteNumber(properties.sourceLatitude);
+      const targetLongitude = toFiniteNumber(properties.targetLongitude);
+      const targetLatitude = toFiniteNumber(properties.targetLatitude);
+      const longitude = showTargetMarkers
+        ? targetLongitude ?? sourceLongitude
+        : sourceLongitude ?? targetLongitude;
+      const latitude = showTargetMarkers
+        ? targetLatitude ?? sourceLatitude
+        : sourceLatitude ?? targetLatitude;
+
+      if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+        return null;
+      }
+
+      return {
+        ...feature,
+        geometry: {
+          ...feature.geometry,
+          coordinates: [longitude, latitude],
+        },
+        properties: {
+          ...properties,
+          mapCoordinates: showTargetMarkers ? "target" : "drone",
+        },
+      };
+    })
+    .filter(Boolean),
+});
+
 const getTraceMaxMethane = (dataset) => {
   if (!dataset?.features?.length) {
     return 5;
@@ -168,7 +278,10 @@ export function Map({
     String(datasetMaxMethane),
   );
   const [lowerLimitInput, setLowerLimitInput] = useState("0");
+  const [showFlightPath, setShowFlightPath] = useState(false);
+  const [showTargetMarkers, setShowTargetMarkers] = useState(false);
   const [droneStates, setDroneStates] = useState([]);
+  const [droneTrackHistory, setDroneTrackHistory] = useState({});
   const [isTelemetryConnected, setIsTelemetryConnected] = useState(false);
   const [mapMode, setMapMode] = useState(() =>
     shouldUseOnlineMap(mapboxToken) ? "online" : "offline",
@@ -177,11 +290,25 @@ export function Map({
   const methaneGradient = buildMethaneGradient(lowerLimit, upperLimit);
   const safeTraceOpacity = Math.min(
     1,
-    Math.max(0, Number.isFinite(Number(traceOpacity)) ? Number(traceOpacity) : 1),
+    Math.max(
+      0,
+      Number.isFinite(Number(traceOpacity)) ? Number(traceOpacity) : 1,
+    ),
   );
   const methanePlumeDataset = useMemo(
     () => buildMethanePlumeDataset(traceDataset),
     [traceDataset],
+  );
+  const displayedTraceDataset = useMemo(
+    () => buildDisplayedTraceDataset(traceDataset, showTargetMarkers),
+    [showTargetMarkers, traceDataset],
+  );
+  const flightPathDataset = useMemo(
+    () =>
+      resultsPageMode
+        ? buildTraceFlightPathFeatureCollection(traceDataset)
+        : buildLiveFlightPathFeatureCollection(droneTrackHistory, selectedDroneId),
+    [droneTrackHistory, resultsPageMode, selectedDroneId, traceDataset],
   );
   const focusedDrone =
     droneStates.find((drone) => drone.drone_id === selectedDroneId) ||
@@ -515,7 +642,9 @@ export function Map({
           ),
           "fill-extrusion-base": ["get", "baseHeight"],
           "fill-extrusion-height": ["get", "plumeHeight"],
-          "fill-extrusion-opacity": plumeViewEnabled ? 0.82 * safeTraceOpacity : 0,
+          "fill-extrusion-opacity": plumeViewEnabled
+            ? 0.82 * safeTraceOpacity
+            : 0,
           "fill-extrusion-vertical-gradient": true,
         },
       });
@@ -534,6 +663,27 @@ export function Map({
       map.addSource("live-drones", {
         type: "geojson",
         data: buildDroneFeatureCollection([]),
+      });
+
+      map.addSource("flight-path", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      map.addLayer({
+        id: "flight-path-line",
+        type: "line",
+        source: "flight-path",
+        layout: {
+          "line-cap": "round",
+          "line-join": "round",
+        },
+        paint: {
+          "line-color": color.blue,
+          "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2, 18, 4],
+          "line-opacity": 0,
+          "line-blur": 0.15,
+        },
       });
 
       map.addLayer({
@@ -776,10 +926,10 @@ export function Map({
     const methaneSource = currentMap?.getSource("methane-traces");
 
     if (methaneSource) {
-      methaneSource.setData(traceDataset);
+      methaneSource.setData(displayedTraceDataset);
 
       if (resultsPageMode) {
-        fitMapToTraceDataset(currentMap, traceDataset, {
+        fitMapToTraceDataset(currentMap, displayedTraceDataset, {
           padding: plumeViewEnabled ? 120 : 20,
           duration: 500,
           maxZoom: 18,
@@ -791,7 +941,12 @@ export function Map({
     if (plumeSource) {
       plumeSource.setData(methanePlumeDataset);
     }
-  }, [methanePlumeDataset, resultsPageMode, traceDataset, plumeViewEnabled]);
+  }, [
+    displayedTraceDataset,
+    methanePlumeDataset,
+    resultsPageMode,
+    plumeViewEnabled,
+  ]);
 
   useEffect(() => {
     const currentMap = mapRef.current;
@@ -885,7 +1040,9 @@ export function Map({
       currentMap.getPaintProperty("methane-plume-caps", "line-opacity") ?? 0,
     );
     const targetPlumeOpacity = plumeViewEnabled ? 0.82 * safeTraceOpacity : 0;
-    const targetPlumeCapsOpacity = plumeViewEnabled ? 0.45 * safeTraceOpacity : 0;
+    const targetPlumeCapsOpacity = plumeViewEnabled
+      ? 0.45 * safeTraceOpacity
+      : 0;
     const durationMs = 420;
     const startAt = performance.now();
 
@@ -969,16 +1126,41 @@ export function Map({
         plumeTransitionFrameRef.current = null;
       }
     };
-  }, [heatmapEnabled, mapMode, plumeViewEnabled, resultsPageMode, safeTraceOpacity]);
+  }, [
+    heatmapEnabled,
+    mapMode,
+    plumeViewEnabled,
+    resultsPageMode,
+    safeTraceOpacity,
+  ]);
 
   useEffect(() => {
     const currentMap = mapRef.current;
     const liveDroneSource = currentMap?.getSource("live-drones");
+    const flightPathSource = currentMap?.getSource("flight-path");
 
     if (liveDroneSource) {
       liveDroneSource.setData(buildDroneFeatureCollection(droneStates));
     }
-  }, [droneStates]);
+
+    if (flightPathSource) {
+      flightPathSource.setData(flightPathDataset);
+    }
+  }, [droneStates, flightPathDataset]);
+
+  useEffect(() => {
+    const currentMap = mapRef.current;
+
+    if (!currentMap?.getLayer("flight-path-line")) {
+      return;
+    }
+
+    currentMap.setPaintProperty(
+      "flight-path-line",
+      "line-opacity",
+      showFlightPath ? (resultsPageMode ? 0.72 : 0.88) : 0,
+    );
+  }, [resultsPageMode, showFlightPath]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -987,6 +1169,31 @@ export function Map({
 
     const upsertDroneState = (incomingEntry) => {
       const normalizedEntry = normalizeDroneState(incomingEntry);
+      const nextLatitude = normalizedEntry.latitude;
+      const nextLongitude = normalizedEntry.longitude;
+
+      if (Number.isFinite(nextLatitude) && Number.isFinite(nextLongitude)) {
+        setDroneTrackHistory((previousHistory) => {
+          const existingCoordinates = previousHistory[normalizedEntry.drone_id] || [];
+          const lastCoordinate = existingCoordinates[existingCoordinates.length - 1];
+
+          if (
+            lastCoordinate &&
+            lastCoordinate[0] === nextLongitude &&
+            lastCoordinate[1] === nextLatitude
+          ) {
+            return previousHistory;
+          }
+
+          return {
+            ...previousHistory,
+            [normalizedEntry.drone_id]: [
+              ...existingCoordinates,
+              [nextLongitude, nextLatitude],
+            ].slice(-500),
+          };
+        });
+      }
 
       setDroneStates((previousState) => {
         const dedupedState = previousState.filter(
@@ -1019,6 +1226,18 @@ export function Map({
             new Date(b.ts || 0).getTime() - new Date(a.ts || 0).getTime(),
         );
         setDroneStates(normalizedRows);
+        setDroneTrackHistory(
+          normalizedRows.reduce((history, row) => {
+            if (
+              Number.isFinite(row.longitude) &&
+              Number.isFinite(row.latitude)
+            ) {
+              history[row.drone_id] = [[row.longitude, row.latitude]];
+            }
+
+            return history;
+          }, {}),
+        );
       } catch {}
     };
 
@@ -1156,25 +1375,52 @@ export function Map({
       style={{ backgroundColor: color.card, padding: "0.5rem" }}
     >
       <div className="flex h-full w-full flex-col gap-3">
-        {!resultsPageMode ? (
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p
-                className="text-xs uppercase tracking-[0.18em]"
-                style={{ color: color.green }}
-              >
-                Position
-              </p>
-              <p
-                className="text-xl font-bold tracking-tight"
-                style={{ color: color.text }}
-              >
-                Drone satellite view
-              </p>
+        <div className="grid grid-cols-2 justify-between">
+          {!resultsPageMode ? (
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p
+                  className="text-xs uppercase tracking-[0.18em]"
+                  style={{ color: color.green }}
+                >
+                  Position
+                </p>
+                <p
+                  className="text-xl font-bold tracking-tight"
+                  style={{ color: color.text }}
+                >
+                  Drone satellite view
+                </p>
+              </div>
             </div>
+          ) : null}
+          <div className="flex flex-row gap-7">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowFlightPath((previous) => !previous)}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showFlightPath ? "bg-green-600" : "bg-gray-300"}`}
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showFlightPath ? "translate-x-5" : "translate-x-0"}`}
+              />
+            </button>
+            <span className="">Flight Path</span>
           </div>
-        ) : null}
-
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowTargetMarkers((previous) => !previous)}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showTargetMarkers ? "bg-green-600" : "bg-gray-300"}`}
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showTargetMarkers ? "translate-x-5" : "translate-x-0"}`}
+              />
+            </button>
+            <span className="">Target Markers</span>
+          </div>
+          </div>
+        </div>
         <div className="flex flex-row justify-between items-center">
           <div
             className="my-1 flex flex-wrap gap-x-4 gap-y-2 text-sm"

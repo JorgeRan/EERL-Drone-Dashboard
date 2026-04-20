@@ -150,12 +150,18 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
     })
     .map((point) => {
       const useTargetCoordinates = point.payload?.map_coordinates === "target";
+      const sourceLatitude = point.latitude;
+      const sourceLongitude = point.longitude;
+      const targetLatitude =
+        point.target_latitude ?? point.payload?.target_latitude ?? null;
+      const targetLongitude =
+        point.target_longitude ?? point.payload?.target_longitude ?? null;
       const displayLatitude = useTargetCoordinates
-        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
-        : point.latitude;
+        ? targetLatitude ?? sourceLatitude
+        : sourceLatitude;
       const displayLongitude = useTargetCoordinates
-        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
-        : point.longitude;
+        ? targetLongitude ?? sourceLongitude
+        : sourceLongitude;
       const traceDisplayMetric = getTraceDisplayMetric(point);
       const traceValue = traceDisplayMetric.value;
 
@@ -182,6 +188,10 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           methane: traceValue,
           displayMetricLabel: traceDisplayMetric.label,
           displayMetricUnits: traceDisplayMetric.units,
+          sourceLatitude,
+          sourceLongitude,
+          targetLatitude,
+          targetLongitude,
           mapCoordinates: useTargetCoordinates ? "target" : "drone",
           detected: traceValue > 0,
           pointColor: traceValue > 0 ? "#4ade80" : "#64748b",

@@ -96,22 +96,30 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const dragHandleRef = useRef(null);
   const dataLength = flowData.length;
   const maxIndex = Math.max(dataLength - 1, 0);
-  const leftAxisPeakValue = Math.max(
+  const fullLeftAxisPeakValue = Math.max(
     1,
     ...flowData.map((point) => point.purway),
     ...flowData.map((point) => point.methane),
   );
-  const rightAxisPeakValue = Math.max(
-    1,
-    ...flowData.map((point) => point.sniffer),
-  );
   const safeSelection = useMemo(
-    () => clampSelection(selection, dataLength, leftAxisPeakValue),
-    [selection, dataLength, leftAxisPeakValue],
+    () => clampSelection(selection, dataLength, fullLeftAxisPeakValue),
+    [selection, dataLength, fullLeftAxisPeakValue],
   );
   const windowedData = useMemo(
     () => flowData.slice(safeSelection.startIndex, safeSelection.endIndex + 1),
     [flowData, safeSelection],
+  );
+  const leftAxisData = resultsPageMode ? windowedData : flowData;
+  const rightAxisData = resultsPageMode ? windowedData : flowData;
+  const leftAxisPeakValue = Math.max(
+    1,
+    safeSelection.ppmMax ?? 0,
+    ...leftAxisData.map((point) => point.purway),
+    ...leftAxisData.map((point) => point.methane),
+  );
+  const rightAxisPeakValue = Math.max(
+    1,
+    ...rightAxisData.map((point) => point.sniffer),
   );
   const filteredData = useMemo(
     () =>
@@ -457,6 +465,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
                 axisLine={{ stroke: color.borderStrong }}
                 width={44}
                 style={{ fontSize: "11px" }}
+                domain={[0, leftAxisPeakValue]}
                 ticks={leftAxisTicks}
                 tick={{ fill: color.text, fontSize: 11 }}
                 label={{
@@ -476,6 +485,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
                 axisLine={{ stroke: color.borderStrong }}
                 width={44}
                 style={{ fontSize: "11px" }}
+                domain={[0, rightAxisPeakValue]}
                 ticks={rightAxisTicks}
                 tick={{ fill: seriesTheme.sniffer.stroke, fontSize: 11 }}
                 label={{
