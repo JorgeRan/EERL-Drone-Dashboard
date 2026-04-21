@@ -3,7 +3,7 @@
   "private": true,
   "author": "JorgeRan",
   "description": "React frontend for MQTT drone data",
-  "version": "0.0.0",
+  "version": "1.0.18",
   "type": "module",
   "scripts": {
     "dev": "vite",
