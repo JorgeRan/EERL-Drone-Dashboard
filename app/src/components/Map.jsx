@@ -106,7 +106,18 @@ const buildTraceFlightPathFeatureCollection = (traceDataset) => {
         Number(left?.properties?.sampleOrder ?? 0) -
         Number(right?.properties?.sampleOrder ?? 0),
     )
-    .map((feature) => feature?.geometry?.coordinates)
+    .map((feature) => {
+      const sourceLongitude = toFiniteNumber(
+        feature?.properties?.sourceLongitude,
+      );
+      const sourceLatitude = toFiniteNumber(feature?.properties?.sourceLatitude);
+
+      if (Number.isFinite(sourceLongitude) && Number.isFinite(sourceLatitude)) {
+        return [sourceLongitude, sourceLatitude];
+      }
+
+      return feature?.geometry?.coordinates;
+    })
     .filter(
       (coordinates) =>
         Number.isFinite(Number(coordinates?.[0])) &&
@@ -260,6 +271,7 @@ export function Map({
   plumeViewEnabled = false,
   traceOpacity = 1,
   onPlumeViewAutoChange,
+  missionConfiguration,
 }) {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
@@ -679,7 +691,7 @@ export function Map({
           "line-join": "round",
         },
         paint: {
-          "line-color": color.blue,
+          "line-color": color.fligthpathOrange,
           "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2, 18, 4],
           "line-opacity": 0,
           "line-blur": 0.15,
@@ -1407,6 +1419,7 @@ export function Map({
             </button>
             <span className="">Flight Path</span>
           </div>
+          {missionConfiguration !== SENSOR_MODE_AERIS ? (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -1418,7 +1431,7 @@ export function Map({
               />
             </button>
             <span className="">Target Markers</span>
-          </div>
+          </div>) : null}
           </div>
         </div>
         <div className="flex flex-row justify-between items-center">

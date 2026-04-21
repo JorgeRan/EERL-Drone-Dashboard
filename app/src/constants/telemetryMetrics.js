@@ -222,11 +222,6 @@ export const extractTelemetryMetrics = (source) => {
     aerisPayload.nitrousOxide,
     aerisPayload.nitrous_oxide,
     aerisPayload.n2o,
-    source?.ethylene,
-    source?.c2h4,
-    payload.ethylene,
-    payload.c2h4,
-    aerisPayload.ethylene,
   );
 
   const hasAerisMetrics = acetylene !== null || nitrousOxide !== null;

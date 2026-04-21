@@ -38,10 +38,10 @@ const COLUMNS = [
     decimals: 3,
   },
   {
-    key: "ethylene",
-    label: "Ethylene",
+    key: "nitrousOxide",
+    label: "Nitrous Oxide",
     align: "right",
-    width: "6.5rem",
+    width: "7.5rem",
     unit: "ppm",
     decimals: 3,
   },
@@ -260,8 +260,6 @@ const normalizeMissionPoint = (point, index, droneId) => {
     purway: metrics.purway,
     methane: metrics.methane,
     acetylene: metrics.acetylene,
-    ethylene:
-      toFiniteNumber(point?.ethylene) ?? toFiniteNumber(point?.nitrousOxide),
     nitrousOxide: metrics.nitrousOxide,
     droneId,
   };

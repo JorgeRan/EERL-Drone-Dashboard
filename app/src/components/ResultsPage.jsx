@@ -83,19 +83,19 @@ const formatCompactValue = (value, digits = 2) => {
   });
 };
 
-const formatDateTimeLocalValue = (value) => {
-  if (!value) {
-    return "";
-  }
+// const formatDateTimeLocalValue = (value) => {
+//   if (!value) {
+//     return "";
+//   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
+//   const date = new Date(value);
+//   if (Number.isNaN(date.getTime())) {
+//     return "";
+//   }
 
-  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
-};
+//   const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+//   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+// };
 
 const getTraceDisplayMetric = (point) => {
   if (point.sensorMode === SENSOR_MODE_AERIS) {
@@ -2353,6 +2353,7 @@ export function ResultsPage({
                     };
                   });
                 }}
+                missionConfiguration={selectedSensorMode}
               />
             </div>
             <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />

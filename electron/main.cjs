@@ -56,6 +56,7 @@ function startManagedChildProcess({
   }
 
   appendRuntimeLog(name, `Starting process with script ${scriptPath}`);
+  const isDevRuntime = !app.isPackaged;
 
   const childProcess = spawn(process.execPath, [scriptPath], {
     cwd: path.dirname(scriptPath),
@@ -69,15 +70,26 @@ function startManagedChildProcess({
   });
 
   childProcess.stdout?.on('data', (chunk) => {
-    appendRuntimeLog(name, `stdout: ${String(chunk).trimEnd()}`);
+    const message = String(chunk).trimEnd();
+    appendRuntimeLog(name, `stdout: ${message}`);
+    if (isDevRuntime && message) {
+      console.log(`[${name}] ${message}`);
+    }
   });
 
   childProcess.stderr?.on('data', (chunk) => {
-    appendRuntimeLog(name, `stderr: ${String(chunk).trimEnd()}`);
+    const message = String(chunk).trimEnd();
+    appendRuntimeLog(name, `stderr: ${message}`);
+    if (isDevRuntime && message) {
+      console.error(`[${name}] ${message}`);
+    }
   });
 
   childProcess.on('spawn', () => {
     appendRuntimeLog(name, `Spawned pid=${childProcess.pid}`);
+    if (isDevRuntime) {
+      console.log(`[${name}] spawned pid=${childProcess.pid}`);
+    }
   });
 
   childProcess.on('exit', (code, signal) => {
@@ -188,7 +200,11 @@ function createWindow() {
 
   if (devServerUrl) {
     win.loadURL(devServerUrl);
-    win.webContents.openDevTools({ mode: 'detach' });
+
+    // Keep dev logs clean by not auto-opening DevTools unless explicitly requested.
+    if (process.env.ELECTRON_OPEN_DEVTOOLS === '1') {
+      win.webContents.openDevTools({ mode: 'detach' });
+    }
   } else {
     win.loadFile(path.join(__dirname, '..', 'app', 'dist', 'index.html'));
   }
@@ -202,7 +218,7 @@ app.whenReady().then(() => {
     }
   }
 
-  // startBridgeProcess();
+  startBridgeProcess();
   startBrokerProcess();
   createWindow();
 
@@ -214,7 +230,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  // stopBridgeProcess();
+  stopBridgeProcess();
   stopBrokerProcess();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -222,6 +238,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  // stopBridgeProcess();
+  stopBridgeProcess();
   stopBrokerProcess();
 });

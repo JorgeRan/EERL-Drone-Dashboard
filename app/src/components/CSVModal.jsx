@@ -11,6 +11,177 @@ const parseNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const COORDINATE_OUTLIER_MAX_DISTANCE_METERS = 1000;
+const COORDINATE_OUTLIER_MAX_SPEED_MPS = 60;
+const COORDINATE_OUTLIER_MAX_TIME_GAP_SECONDS = 180;
+
+const isValidLatitude = (value) =>
+  Number.isFinite(value) && value >= -90 && value <= 90;
+
+const isValidLongitude = (value) =>
+  Number.isFinite(value) && value >= -180 && value <= 180;
+
+const hasInvalidCoordinatePair = (latitude, longitude) => {
+  const hasLatitude = Number.isFinite(latitude);
+  const hasLongitude = Number.isFinite(longitude);
+
+  if (!hasLatitude && !hasLongitude) {
+    return false;
+  }
+
+  return (
+    !hasLatitude ||
+    !hasLongitude ||
+    !isValidLatitude(latitude) ||
+    !isValidLongitude(longitude)
+  );
+};
+
+const hasOriginCoordinatePair = (latitude, longitude) =>
+  Number(latitude) === 0 && Number(longitude) === 0;
+
+const toRadians = (value) => (value * Math.PI) / 180;
+
+const haversineDistanceMeters = (from, to) => {
+  if (
+    !from ||
+    !to ||
+    !isValidLatitude(from.latitude) ||
+    !isValidLongitude(from.longitude) ||
+    !isValidLatitude(to.latitude) ||
+    !isValidLongitude(to.longitude)
+  ) {
+    return null;
+  }
+
+  const earthRadiusMeters = 6371000;
+  const latitudeDelta = toRadians(to.latitude - from.latitude);
+  const longitudeDelta = toRadians(to.longitude - from.longitude);
+  const fromLatitudeRadians = toRadians(from.latitude);
+  const toLatitudeRadians = toRadians(to.latitude);
+  const a =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(fromLatitudeRadians) *
+      Math.cos(toLatitudeRadians) *
+      Math.sin(longitudeDelta / 2) ** 2;
+
+  return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+const resolvePointMapCoordinates = (point) => {
+  const useTargetCoordinates = point?.payload?.map_coordinates === "target";
+  const latitude = useTargetCoordinates
+    ? point?.target_latitude ?? point?.payload?.target_latitude ?? point?.latitude
+    : point?.latitude;
+  const longitude = useTargetCoordinates
+    ? point?.target_longitude ?? point?.payload?.target_longitude ?? point?.longitude
+    : point?.longitude;
+
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+    return null;
+  }
+
+  return { latitude, longitude };
+};
+
+const filterMissionResultEntryOutliers = (entry) => {
+  const accepted = [];
+  let droppedCount = 0;
+
+  for (const point of Array.isArray(entry?.data) ? entry.data : []) {
+    if (
+      hasOriginCoordinatePair(point?.latitude, point?.longitude) ||
+      hasOriginCoordinatePair(point?.target_latitude, point?.target_longitude) ||
+      hasInvalidCoordinatePair(point?.latitude, point?.longitude) ||
+      hasInvalidCoordinatePair(point?.target_latitude, point?.target_longitude)
+    ) {
+      droppedCount += 1;
+      continue;
+    }
+
+    const currentCoordinates = resolvePointMapCoordinates(point);
+    if (!currentCoordinates) {
+      accepted.push(point);
+      continue;
+    }
+
+    const previousPoint = accepted[accepted.length - 1] || null;
+    const previousCoordinates = resolvePointMapCoordinates(previousPoint);
+
+    if (!previousCoordinates) {
+      accepted.push(point);
+      continue;
+    }
+
+    const distanceMeters = haversineDistanceMeters(
+      previousCoordinates,
+      currentCoordinates,
+    );
+
+    if (
+      !Number.isFinite(distanceMeters) ||
+      distanceMeters <= COORDINATE_OUTLIER_MAX_DISTANCE_METERS
+    ) {
+      accepted.push(point);
+      continue;
+    }
+
+    const currentTimestampMs = Number(point?.timestampMs);
+    const previousTimestampMs = Number(previousPoint?.timestampMs);
+
+    if (
+      !Number.isFinite(currentTimestampMs) ||
+      !Number.isFinite(previousTimestampMs)
+    ) {
+      droppedCount += 1;
+      continue;
+    }
+
+    const elapsedSeconds =
+      Math.abs(currentTimestampMs - previousTimestampMs) / 1000;
+
+    if (elapsedSeconds > COORDINATE_OUTLIER_MAX_TIME_GAP_SECONDS) {
+      accepted.push(point);
+      continue;
+    }
+
+    if (elapsedSeconds === 0) {
+      droppedCount += 1;
+      continue;
+    }
+
+    const speedMetersPerSecond = distanceMeters / elapsedSeconds;
+    if (speedMetersPerSecond > COORDINATE_OUTLIER_MAX_SPEED_MPS) {
+      droppedCount += 1;
+      continue;
+    }
+
+    accepted.push(point);
+  }
+
+  return {
+    entry: accepted.length > 0 ? { ...entry, data: accepted } : null,
+    droppedCount,
+  };
+};
+
+const filterMissionResultsOutliers = (missionResults) => {
+  let droppedCount = 0;
+
+  const filtered = (Array.isArray(missionResults) ? missionResults : [])
+    .map((entry) => {
+      const result = filterMissionResultEntryOutliers(entry);
+      droppedCount += result.droppedCount;
+      return result.entry;
+    })
+    .filter((entry) => Array.isArray(entry?.data) && entry.data.length > 0);
+
+  return {
+    missionResults: filtered,
+    droppedCount,
+  };
+};
+
 const normalizeHeader = (value) =>
   String(value ?? "")
     .trim()
@@ -147,7 +318,8 @@ const parseStandardCsvToMissionResults = (
   const gpsTimeIdx = idx("gps_time");
   const methaneIdx = idx("methane_concentration", "methane", "ch4");
   const acetyleneIdx = idx("acetylene", "c2h2");
-  const ethyleneIdx = idx("ethylene", "c2h4", "nitrous_oxide", "n2o");
+  const ethyleneIdx = idx("ethylene", "c2h4");
+  const nitrousOxideIdx = idx("nitrous_oxide", "nitrousoxide", "n2o");
   const snifferIdx = idx("sniffer", "sniffer_ppm", "sniffer_methane");
   const purwayIdx = idx("purway", "purway_ppm_m", "purway_ppn", "purway_ppm");
   const latIdx = idx("rtk_lat", "latitude", "lat", "center_lat", "gimbal_lat", "ref_lat");
@@ -223,6 +395,8 @@ const parseStandardCsvToMissionResults = (
           : defaultSensorMode,
       methane,
       acetylene: acetyleneIdx !== -1 ? parseNumber(cols[acetyleneIdx]) : null,
+      nitrousOxide:
+        nitrousOxideIdx !== -1 ? parseNumber(cols[nitrousOxideIdx]) : null,
       ethylene: ethyleneIdx !== -1 ? parseNumber(cols[ethyleneIdx]) : null,
       sniffer,
       purway,
@@ -457,17 +631,23 @@ function parseCsvToMissionResults(text, options) {
     );
 
     if (aerisResults) {
-      return aerisResults;
+      return filterMissionResultsOutliers(aerisResults);
     }
   }
 
-  return parseStandardCsvToMissionResults(
+  const standardResults = parseStandardCsvToMissionResults(
     lines,
     headers,
     fallbackDroneId,
     defaultSensorMode || SENSOR_MODE_DUAL,
     parseOptions,
   );
+
+  if (!standardResults) {
+    return { missionResults: null, droppedCount: 0 };
+  }
+
+  return filterMissionResultsOutliers(standardResults);
 }
 
 export function CSVImportModal({
@@ -542,7 +722,7 @@ export function CSVImportModal({
         selectedDroneId.trim() ||
         file.name.replace(/\.csv$/i, "").trim() ||
         "csv-import";
-      const results = parseCsvToMissionResults(fileText, {
+      const { missionResults: results, droppedCount } = parseCsvToMissionResults(fileText, {
         fallbackDroneId,
         defaultSensorMode: selectedSensorId || SENSOR_MODE_DUAL,
         fileLastModified: file.lastModified,
@@ -580,7 +760,9 @@ export function CSVImportModal({
           (sum, entry) => sum + entry.data.length,
           0,
         );
-        onComplete?.(`Mission "${name}" created with ${rowCount} rows`);
+        onComplete?.(
+          `Mission "${name}" created with ${rowCount} rows${droppedCount > 0 ? `, ignored ${droppedCount} coordinate outlier${droppedCount === 1 ? "" : "s"}` : ""}`,
+        );
         onClose();
       } else if (choice === "existing") {
         if (!selectedId) {
@@ -612,7 +794,7 @@ export function CSVImportModal({
         const addedCount = Number(payload.added || 0);
         const totalCount = Number(payload.totalIncoming || 0);
         onComplete?.(
-          `Updated "${selectedName}": merged ${mergedCount}, added ${addedCount} (from ${totalCount} CSV rows)`,
+          `Updated "${selectedName}": merged ${mergedCount}, added ${addedCount} (from ${totalCount} CSV rows${droppedCount > 0 ? `, ignored ${droppedCount} outlier${droppedCount === 1 ? "" : "s"}` : ""})`,
         );
         onClose();
       }

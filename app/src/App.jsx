@@ -1235,6 +1235,7 @@ function App() {
                   onScaleChange={setLegendScale}
                   selectedDroneId={selectedDeviceId}
                   resultsPageMode={false}
+                  missionConfiguration={activeSensorMode}
                 />
                 <Position
                   traceDataset={filteredTraceDataset}
