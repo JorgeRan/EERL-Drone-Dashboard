@@ -1,9 +1,28 @@
 const { app, BrowserWindow } = require('electron');
-const { spawn } = require('node:child_process');
+const { spawn, execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const { createSocket } = require('node:dgram');
+
+// Auto-install Python dependencies on first run
+function ensurePythonDependencies() {
+  // You can change this to a bundled python path if needed
+  const pythonExe = 'python';
+  try {
+    execSync(`${pythonExe} -c "import matplotlib, numpy, scipy"`, { stdio: 'ignore' });
+    // All required packages are present
+  } catch {
+    // Not all packages are present, install them
+    const reqPath = getAppContentPath('backend', 'requirements.txt');
+    try {
+      execSync(`${pythonExe} -m pip install --upgrade pip`, { stdio: 'inherit' });
+      execSync(`${pythonExe} -m pip install -r "${reqPath}"`, { stdio: 'inherit' });
+    } catch (err) {
+      console.error('Failed to install Python dependencies:', err);
+    }
+  }
+}
 
 let bridgeProcess = null;
 let brokerProcess = null;
@@ -313,6 +332,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Ensure Python dependencies are installed before anything else
+  ensurePythonDependencies();
   if (process.platform === 'darwin' && app.dock && !app.isPackaged) {
     const devIconPath = getDevIconPath();
     if (fs.existsSync(devIconPath)) {
