@@ -410,6 +410,7 @@ export function Map({
   const [upperLimitInput, setUpperLimitInput] = useState(
     String(datasetMaxMethane),
   );
+  const [showTargetSwitch, setShowTargetSwitch] = useState(false);
   const [lowerLimitInput, setLowerLimitInput] = useState("0");
   const [showFlightPath, setShowFlightPath] = useState(false);
   const [showTargetMarkers, setShowTargetMarkers] = useState(false);
@@ -1005,6 +1006,14 @@ export function Map({
         popupRef.current?.remove();
       });
 
+      setShowTargetSwitch(
+        missionConfiguration && typeof missionConfiguration === 'object'
+          ? Object.values(missionConfiguration).some(
+              v => typeof v === 'string' && v.toLowerCase().includes('dual')
+            )
+          : false
+      );
+
       if (resultsPageMode) {
         fitMapToTraceDataset(map, initialTraceDatasetRef.current, {
           padding: 20,
@@ -1580,6 +1589,15 @@ export function Map({
     onScaleChange?.({ lowerLimit, upperLimit });
   }, [lowerLimit, onScaleChange, upperLimit]);
 
+  const drones = ['M350', 'M400-1', 'M400-2'];
+
+  console.log(missionConfiguration['M400-1']);
+  for (let i = 0; i < 2; i++) {
+    if (missionConfiguration[drones[i]] !== undefined) {
+      console.log(`Drone ${drones[i]}:`, missionConfiguration[drones[i]]);
+    }
+
+  }
   return (
     <div
       className={tw.panel}
@@ -1587,11 +1605,10 @@ export function Map({
     >
       <div className="flex h-full w-full flex-col gap-3">
         <div
-          className={`grid grid-cols-1 gap-3 xl:items-start ${
-            resultsPageMode
-              ? "xl:grid-cols-1"
-              : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
-          }`}
+          className={`grid grid-cols-1 gap-3 xl:items-start ${resultsPageMode
+            ? "xl:grid-cols-1"
+            : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
+            }`}
         >
           {!resultsPageMode ? (
             <div className="flex items-center justify-start gap-3 rounded-lg  px-3 py-2"
@@ -1699,9 +1716,7 @@ export function Map({
                       className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${plumeViewEnabled ? "translate-x-5" : "translate-x-0"}`}
                     />
                   </button>
-                  <span className="text-sm" style={{ color: color.textMuted }}>
-                    Plume View
-                  </span>
+                  <span className="text-sm" style={{ color: color.textMuted }}>Plume View</span>
                 </div>
               ) : null}
 
@@ -1717,7 +1732,7 @@ export function Map({
                 </button>
                 <span className="text-sm" style={{ color: color.textMuted }}>Flight Path</span>
               </div>
-              {missionConfiguration === SENSOR_MODE_AERIS ? (
+              {showTargetSwitch && (
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -1730,7 +1745,7 @@ export function Map({
                   </button>
                   <span className="text-sm" style={{ color: color.textMuted }}>Target Markers</span>
                 </div>
-              ) : null}
+              )}
             </div>
           </div>
         </div>

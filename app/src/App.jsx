@@ -1327,7 +1327,12 @@ function App() {
                   droneVisibilityById={dashboardDroneVisibility}
                   onToggleDroneVisibility={handleToggleDashboardDroneVisibility}
                   resultsPageMode={false}
-                  missionConfiguration={activeSensorMode}
+                  missionConfiguration={{
+                    ...(devices.reduce((acc, d) => {
+                      acc[d.id] = activeSensorMode;
+                      return acc;
+                    }, {})),
+                  }}
                 />
                 <Position
                   traceDataset={filteredTraceDataset}

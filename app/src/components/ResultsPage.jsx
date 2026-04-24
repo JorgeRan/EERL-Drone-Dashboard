@@ -47,6 +47,8 @@ const DEFAULT_TRANSECT_WIDTH_M = 80.0;
 const DEFAULT_MIXING_HEIGHT_M = 25.0;
 const DELETE_ALL_HOLD_MS = 2000;
 
+let sensorModePresentationCache = {};
+
 const sensorModePresentation = (sensorMode) => {
   if (sensorMode === SENSOR_MODE_AERIS) {
     return {
@@ -537,7 +539,7 @@ export function ResultsPage({
   measurementStatus = "idle",
 }) {
   const [selectedMissionId, setSelectedMissionId] = useState(null);
-
+  const [selectedMissionConfiguration, setSelectedMissionConfiguration] = useState(null);
   const [selectedResultDroneId, setSelectedResultDroneId] =
     useState(ALL_DRONES_OPTION);
   const [missionsSample, setMissionsSample] = useState([]);
@@ -1631,6 +1633,7 @@ export function ResultsPage({
                     type="button"
                     onClick={() => {
                       setSelectedMissionId(mission.id);
+                      
                       setSelectedResultDroneId(ALL_DRONES_OPTION);
                       onSelectDevice?.(
                         mission.primaryDroneId || selectedDeviceId,
@@ -1866,6 +1869,7 @@ export function ResultsPage({
                     type="button"
                     onClick={() => {
                       setSelectedMissionId(mission.id);
+                      setSelectedMissionConfiguration(mission.droneSensorModeById);
                       setSelectedResultDroneId(ALL_DRONES_OPTION);
                       onSelectDevice?.(
                         mission.primaryDroneId || selectedDeviceId,
@@ -1908,6 +1912,7 @@ export function ResultsPage({
                           const presentation = sensorModePresentation(
                             mission.droneSensorModeById?.[droneId],
                           );
+                          
 
                           return (
                             <span
@@ -2330,8 +2335,7 @@ export function ResultsPage({
                     };
                   });
                 }}
-                missionConfiguration={
-                  sensorsMode}
+                missionConfiguration={selectedMissionConfiguration && typeof selectedMissionConfiguration === 'object' ? selectedMissionConfiguration : {}}
               />
             </div>
             <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />
@@ -2679,3 +2683,6 @@ export function ResultsPage({
     </div>
   );
 }
+
+
+
