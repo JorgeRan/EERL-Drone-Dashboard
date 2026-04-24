@@ -333,10 +333,46 @@ export const createRemoteTelemetryStore = ({ telemetryTable, latestStateTable })
         return writeQueue;
     };
 
+    const fetchRemoteSince = async ({ sinceTs = null, limit = 2000 } = {}) => {
+        const isReady = await initialize();
+        if (!isReady) {
+            return null;
+        }
+
+        try {
+            let rows;
+            if (sinceTs) {
+                rows = await remoteSql.unsafe(
+                    `SELECT id, drone_id, topic, ts, latitude, longitude, altitude, target_latitude, target_longitude, methane, sniffer, purway, distance, payload
+                     FROM ${telemetryTable}
+                     WHERE ts > $1
+                     ORDER BY ts ASC
+                     LIMIT $2`,
+                    [sinceTs, limit],
+                );
+            } else {
+                rows = await remoteSql.unsafe(
+                    `SELECT id, drone_id, topic, ts, latitude, longitude, altitude, target_latitude, target_longitude, methane, sniffer, purway, distance, payload
+                     FROM ${telemetryTable}
+                     ORDER BY ts ASC
+                     LIMIT $1`,
+                    [limit],
+                );
+            }
+
+            markRemoteAvailable();
+            return rows;
+        } catch (error) {
+            markRemoteFailure(error, 'fetch');
+            return null;
+        }
+    };
+
     return {
         enabled: true,
         initialize,
         mirrorTelemetry,
+        fetchRemoteSince,
         getStatus: () => ({
             enabled: true,
             available,

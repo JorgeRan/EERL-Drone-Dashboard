@@ -55,6 +55,19 @@ const chartFrame = {
   right: 12,
 };
 
+const formatTooltipValue = (value) => {
+  if (value === null || value === undefined) {
+    return "--";
+  }
+
+  if (typeof value === "string" && value.trim() === "") {
+    return "--";
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toFixed(2) : "--";
+};
+
 function formatDuration(durationMs) {
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -545,10 +558,10 @@ export function AerisPanel({
           >
             <div className="flex flex-row gap-4">
               <div>
-                T1 = {formatDuration(windowStart?.timestampMs ?? "--").slice(4)}
+                T1 = {windowStart?.time ?? "--"}
               </div>
               <div>
-                T2 = {formatDuration(windowEnd?.timestampMs ?? "--").slice(4)}
+                T2 = {windowEnd?.time ?? "--"}
               </div>
             </div>
             <div className="flex items-center">ΔT = {deltaTime}</div>
@@ -639,11 +652,7 @@ export function AerisPanel({
                         const point = payload?.[0]?.payload;
                         return point?.timestampIso ?? value;
                       }}
-                      formatter={(value) =>
-                        value != null && !Number.isNaN(value)
-                          ? Number(value).toFixed(2)
-                          : "0.00"
-                      }
+                      formatter={(value) => formatTooltipValue(value)}
                       labelStyle={{ color: color.text }}
                     />
                     {safeSelection.startIndex > 0 ? (

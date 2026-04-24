@@ -108,6 +108,8 @@ let hasInternet = false;
 let internetCheckTimer = null;
 let syncInProgress = false;
 let missionSyncInProgress = false;
+let pullSyncInProgress = false;
+let pullMissionSyncInProgress = false;
 let isAerisAnalysisRunning = false;
 let serialPortHandle = null;
 let serialTelemetryStatus = {
@@ -426,10 +428,19 @@ const createNotebookInputPayload = (body = {}) => {
 
 const runAerisNotebook = async (inputPayload = null) => {
   console.log("Running Aeris Notebook");
-  const notebookPath = path.join(__dirname, AERIS_NOTEBOOK_FILE);
-  const notebookInputPath = path.join(__dirname, AERIS_NOTEBOOK_INPUT_FILE);
+  const analysisDirCandidates = [
+    path.join(__dirname, "analysis"),
+    path.join(__dirname, "..", "analysis"),
+  ];
+  const analysisDir =
+    analysisDirCandidates.find((candidate) => existsSync(candidate)) ||
+    analysisDirCandidates[0];
+  const notebookPath = path.join(analysisDir, AERIS_NOTEBOOK_FILE);
+  const notebookInputPath = path.join(analysisDir, AERIS_NOTEBOOK_INPUT_FILE);
+  const dataBrokerPath = path.join(analysisDir, AERIS_DATA_BROKER_FILE);
   let brokerResult = null;
   const bundledVenvDir = path.join(__dirname, ".venv");
+  const workspaceVenvDir = path.join(__dirname, "..", ".venv");
   const bundledPythonCandidates = process.platform === "win32"
     ? [
         path.join(bundledVenvDir, "Scripts", "python.exe"),
@@ -439,8 +450,18 @@ const runAerisNotebook = async (inputPayload = null) => {
         path.join(bundledVenvDir, "bin", "python3"),
         path.join(bundledVenvDir, "bin", "python"),
       ];
+  const workspacePythonCandidates = process.platform === "win32"
+    ? [
+        path.join(workspaceVenvDir, "Scripts", "python.exe"),
+        path.join(workspaceVenvDir, "Scripts", "python3.exe"),
+      ]
+    : [
+        path.join(workspaceVenvDir, "bin", "python3"),
+        path.join(workspaceVenvDir, "bin", "python"),
+      ];
   const pythonCandidates = [
     ...bundledPythonCandidates.filter((candidate) => existsSync(candidate)),
+    ...workspacePythonCandidates.filter((candidate) => existsSync(candidate)),
     process.env.PYTHON_EXECUTABLE,
     "python3",
     "python",
@@ -448,6 +469,13 @@ const runAerisNotebook = async (inputPayload = null) => {
   const uniqueCandidates = [...new Set(pythonCandidates)];
 
   let lastError = null;
+  const hasMissingNotebookModule = (error) => {
+    const message = String(error?.message || "").toLowerCase();
+    return (
+      message.includes("no module named jupyter") ||
+      message.includes("no module named nbconvert")
+    );
+  };
 
   for (const pythonCommand of uniqueCandidates) {
     try {
@@ -467,13 +495,13 @@ const runAerisNotebook = async (inputPayload = null) => {
         const brokerRun = await runCommand({
           command: pythonCommand,
           args: [
-            AERIS_DATA_BROKER_FILE,
+            dataBrokerPath,
             "--limit",
             String(AERIS_NOTEBOOK_SAMPLE_LIMIT),
             "--output",
-            AERIS_NOTEBOOK_INPUT_FILE,
+            notebookInputPath,
           ],
-          cwd: __dirname,
+          cwd: analysisDir,
           timeoutMs: AERIS_NOTEBOOK_TIMEOUT_MS,
         });
 
@@ -492,9 +520,8 @@ const runAerisNotebook = async (inputPayload = null) => {
     }
 
     try {
-      await runCommand({
-        command: pythonCommand,
-        args: [
+      const nbconvertArgumentSets = [
+        [
           "-m",
           "jupyter",
           "nbconvert",
@@ -503,11 +530,67 @@ const runAerisNotebook = async (inputPayload = null) => {
           "--execute",
           "--inplace",
           "--ExecutePreprocessor.timeout=180",
-          AERIS_NOTEBOOK_FILE,
+          notebookPath,
         ],
-        cwd: __dirname,
-        timeoutMs: AERIS_NOTEBOOK_TIMEOUT_MS,
-      });
+        [
+          "-m",
+          "nbconvert",
+          "--to",
+          "notebook",
+          "--execute",
+          "--inplace",
+          "--ExecutePreprocessor.timeout=180",
+          notebookPath,
+        ],
+      ];
+
+      const executeNotebookWithFallback = async () => {
+        let notebookExecutionError = null;
+
+        for (const args of nbconvertArgumentSets) {
+          try {
+            await runCommand({
+              command: pythonCommand,
+              args,
+              cwd: analysisDir,
+              timeoutMs: AERIS_NOTEBOOK_TIMEOUT_MS,
+            });
+            return;
+          } catch (error) {
+            notebookExecutionError = error;
+          }
+        }
+
+        throw notebookExecutionError || new Error("Failed to execute notebook");
+      };
+
+      try {
+        await executeNotebookWithFallback();
+      } catch (error) {
+        if (!hasMissingNotebookModule(error)) {
+          throw error;
+        }
+
+        await runCommand({
+          command: pythonCommand,
+          args: [
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "jupyter_client",
+            "jupyter_core",
+            "nbformat",
+            "nbconvert",
+            "ipykernel",
+          ],
+          cwd: analysisDir,
+          timeoutMs: Math.max(AERIS_NOTEBOOK_TIMEOUT_MS, 240000),
+        });
+
+        await executeNotebookWithFallback();
+      }
 
       const notebookContent = await readFile(notebookPath, "utf8");
       const notebookJson = JSON.parse(notebookContent);
@@ -602,6 +685,9 @@ const initializeDatabase = async () => {
 
   await sql.unsafe(
     `CREATE INDEX IF NOT EXISTS idx_telemetry_events_drone_ts ON ${TELEMETRY_TABLE} (drone_id, ts DESC)`,
+  );
+  await sql.unsafe(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_telemetry_events_drone_ts_unique ON ${TELEMETRY_TABLE} (drone_id, ts)`,
   );
 
   await sql.unsafe(`
@@ -860,7 +946,6 @@ const getTelemetryCoordinateOutlierReason = async (telemetry) => {
     return "invalid coordinate range";
   }
 
-  // Delay jump filtering briefly after startup or per-drone first sighting.
   if (isWithinOutlierGraceWindow(telemetry.droneId)) {
     return null;
   }
@@ -1488,6 +1573,129 @@ const syncPendingMissionsToRemote = async () => {
   }
 };
 
+const pullTelemetryFromRemote = async () => {
+  if (pullSyncInProgress || !remoteTelemetryStore.enabled) {
+    return;
+  }
+
+  pullSyncInProgress = true;
+
+  try {
+    const latestLocalRow = await sql.unsafe(
+      `SELECT ts FROM ${TELEMETRY_TABLE} ORDER BY ts DESC LIMIT 1`,
+    );
+    const sinceTs = latestLocalRow?.[0]?.ts ?? null;
+
+    let totalPulled = 0;
+    let lastTs = sinceTs;
+
+    while (true) {
+      const remoteRows = await remoteTelemetryStore.fetchRemoteSince({
+        sinceTs: lastTs,
+        limit: REMOTE_SYNC_BATCH_SIZE,
+      });
+
+      if (!remoteRows || remoteRows.length === 0) {
+        break;
+      }
+
+      for (const row of remoteRows) {
+        const payload = typeof row.payload === 'object'
+          ? JSON.stringify(row.payload)
+          : row.payload;
+
+        await sql.unsafe(
+          `INSERT OR IGNORE INTO ${TELEMETRY_TABLE}
+            (drone_id, topic, ts, latitude, longitude, altitude, target_latitude, target_longitude, methane, sniffer, purway, distance, payload, remote_synced, remote_synced_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, CURRENT_TIMESTAMP)`,
+          [
+            row.drone_id,
+            row.topic,
+            row.ts,
+            row.latitude ?? null,
+            row.longitude ?? null,
+            row.altitude ?? null,
+            row.target_latitude ?? null,
+            row.target_longitude ?? null,
+            row.methane ?? null,
+            row.sniffer ?? null,
+            row.purway ?? null,
+            row.distance ?? null,
+            payload,
+          ],
+        );
+
+        totalPulled += 1;
+        lastTs = row.ts;
+      }
+
+      if (remoteRows.length < REMOTE_SYNC_BATCH_SIZE) {
+        break;
+      }
+    }
+
+    if (totalPulled > 0) {
+      console.log(`Pulled ${totalPulled} telemetry row(s) from Supabase into local database.`);
+    }
+  } catch (error) {
+    console.warn(`Remote pull sync failed: ${error.message}`);
+  } finally {
+    pullSyncInProgress = false;
+  }
+};
+
+const pullMissionsFromRemote = async () => {
+  if (pullMissionSyncInProgress || !remoteMissionStore.enabled) {
+    return;
+  }
+
+  pullMissionSyncInProgress = true;
+
+  try {
+    const remoteRows = await remoteMissionStore.fetchAllRemote();
+
+    if (!remoteRows || remoteRows.length === 0) {
+      return;
+    }
+
+    let totalPulled = 0;
+
+    for (const row of remoteRows) {
+      const results = typeof row.results === 'object'
+        ? JSON.stringify(row.results)
+        : row.results;
+
+      const existing = await sql.unsafe(
+        `SELECT id, elapsed_seconds FROM ${MISSIONS_TABLE} WHERE id = $1`,
+        [row.id],
+      );
+
+      if (existing.length === 0) {
+        await sql.unsafe(
+          `INSERT INTO ${MISSIONS_TABLE} (id, name, created_at, elapsed_seconds, results)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [row.id, row.name, row.created_at, row.elapsed_seconds, results],
+        );
+        totalPulled += 1;
+      } else if (row.elapsed_seconds > (existing[0].elapsed_seconds || 0)) {
+        await sql.unsafe(
+          `UPDATE ${MISSIONS_TABLE} SET name = $1, created_at = $2, elapsed_seconds = $3, results = $4 WHERE id = $5`,
+          [row.name, row.created_at, row.elapsed_seconds, results, row.id],
+        );
+        totalPulled += 1;
+      }
+    }
+
+    if (totalPulled > 0) {
+      console.log(`Pulled/updated ${totalPulled} mission(s) from Supabase into local database.`);
+    }
+  } catch (error) {
+    console.warn(`Remote mission pull failed: ${error.message}`);
+  } finally {
+    pullMissionSyncInProgress = false;
+  }
+};
+
 const startInternetChecker = async () => {
   const checkConnection = async () => {
     const wasOnline = hasInternet;
@@ -1499,6 +1707,8 @@ const startInternetChecker = async () => {
       );
       void syncPendingTelemetryToRemote();
       void syncPendingMissionsToRemote();
+      void pullTelemetryFromRemote();
+      void pullMissionsFromRemote();
     }
 
     if (wasOnline && !hasInternet) {
@@ -1509,6 +1719,8 @@ const startInternetChecker = async () => {
 
     void syncPendingTelemetryToRemote();
     void syncPendingMissionsToRemote();
+    void pullTelemetryFromRemote();
+    void pullMissionsFromRemote();
   };
 
   await checkConnection();
@@ -1621,7 +1833,6 @@ const startUdpListener = async () => {
   for (let offset = 0; offset < PORT_FALLBACK_ATTEMPTS && !bound; offset += 1) {
     const candidatePort = UDP_PORT + offset;
 
-    // eslint-disable-next-line no-await-in-loop
     await new Promise((resolve, reject) => {
       const handleError = (error) => {
         udpServer.off("error", handleError);
@@ -1675,12 +1886,94 @@ client.on("connect", () => {
 client.on("message", async (receivedTopic, message) => {
   try {
     const rawPayload = JSON.parse(message.toString());
-    const normalizedTopic = resolveTopic(rawPayload, receivedTopic);
-    await ingestTelemetry({
-      source: "MQTT",
-      receivedTopic: normalizedTopic,
-      rawPayload,
-    });
+    // Batch payload support: { d: "droneId", b: [[...], ...] }
+    if (rawPayload && typeof rawPayload.d === "string" && Array.isArray(rawPayload.b)) {
+      // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z]
+      const batchDroneId = rawPayload.d;
+      for (const row of rawPayload.b) {
+        if (!Array.isArray(row)) continue;
+        const [
+          timestamp,
+          methane,
+          sniffer_methane,
+          distance,
+          latitude,
+          longitude,
+          altitude,
+          target_latitude,
+          target_longitude,
+          wind_x,
+          wind_y,
+          wind_z
+        ] = row;
+        const batchPayload = {
+          droneId: batchDroneId,
+          timestamp,
+          methane,
+          sniffer_methane,
+          distance,
+          latitude,
+          longitude,
+          altitude,
+          target_latitude,
+          target_longitude,
+          wind_u: wind_x,
+          wind_v: wind_y,
+          wind_w: wind_z
+        };
+        const normalizedTopic = resolveTopic(batchPayload, receivedTopic);
+        await ingestTelemetry({
+          source: "MQTT",
+          receivedTopic: normalizedTopic,
+          rawPayload: batchPayload,
+        });
+      }
+    } else if (Array.isArray(rawPayload)) {
+      // Handle receiving a single array as the payload
+      // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z]
+      console.log("Received array payload, mapping to telemetry fields:", rawPayload);
+      const [
+        timestamp,
+        methane,
+        sniffer_methane,
+        distance,
+        latitude,
+        longitude,
+        altitude,
+        target_latitude,
+        target_longitude,
+        wind_x,
+        wind_y,
+        wind_z
+      ] = rawPayload;
+      const batchPayload = {
+        timestamp,
+        methane,
+        sniffer_methane,
+        distance,
+        latitude,
+        longitude,
+        altitude,
+        target_latitude,
+        target_longitude,
+        wind_u: wind_x,
+        wind_v: wind_y,
+        wind_w: wind_z
+      };
+      const normalizedTopic = resolveTopic(batchPayload, receivedTopic);
+      await ingestTelemetry({
+        source: "MQTT",
+        receivedTopic: normalizedTopic,
+        rawPayload: batchPayload,
+      });
+    } else {
+      const normalizedTopic = resolveTopic(rawPayload, receivedTopic);
+      await ingestTelemetry({
+        source: "MQTT",
+        receivedTopic: normalizedTopic,
+        rawPayload,
+      });
+    }
   } catch (error) {
     console.error("Failed to process MQTT message:", error.message);
   }
@@ -1742,6 +2035,26 @@ app.post("/api/measurement/stop", (_req, res) => {
 
 app.post("/api/measurement/config", (req, res) => {
   res.json(updateMeasurementConfig(req.body || {}));
+});
+
+app.post("/api/data/sync", async (_req, res) => {
+  try {
+    await syncPendingTelemetryToRemote();
+    await syncPendingMissionsToRemote();
+    await pullTelemetryFromRemote();
+    await pullMissionsFromRemote();
+
+    return res.json({
+      ok: true,
+      telemetryRemote: remoteTelemetryStore.getStatus(),
+      missionsRemote: remoteMissionStore.getStatus(),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
 });
 
 app.post("/api/aeris/analyze", async (req, res) => {
@@ -1968,6 +2281,16 @@ app.put("/api/missions/:id", async (req, res) => {
       return sniffer ?? 0;
     };
 
+    const toCoordToken = (value) => {
+      const parsed = toFiniteNumber(value);
+      return parsed === null ? "" : parsed.toFixed(6);
+    };
+
+    const toMetricToken = (value) => {
+      const parsed = toFiniteNumber(value);
+      return parsed === null ? "" : parsed.toFixed(4);
+    };
+
     const buildMatchKey = (point) => {
       const tsMs = toTimestampMs(point);
       if (!Number.isFinite(tsMs)) {
@@ -1975,7 +2298,32 @@ app.put("/api/missions/:id", async (req, res) => {
       }
 
       const methane = toMethaneValue(point);
-      return `${Math.round(tsMs / 1000)}|${Number(methane).toFixed(2)}`;
+      const sniffer = toFiniteNumber(
+        point?.sniffer ?? point?.payload?.sniffer_ppm,
+      );
+      const purway = toFiniteNumber(
+        point?.purway ??
+          point?.payload?.purway_ppm_m ??
+          point?.payload?.purway_ppn ??
+          point?.payload?.purway_ppm,
+      );
+      const acetylene = toFiniteNumber(point?.acetylene ?? point?.c2h2);
+      const nitrousOxide = toFiniteNumber(
+        point?.nitrousOxide ?? point?.nitrous_oxide ?? point?.n2o,
+      );
+      const latitude = toFiniteNumber(point?.latitude);
+      const longitude = toFiniteNumber(point?.longitude);
+
+      return [
+        String(Math.round(tsMs)),
+        toMetricToken(methane),
+        toMetricToken(sniffer),
+        toMetricToken(purway),
+        toMetricToken(acetylene),
+        toMetricToken(nitrousOxide),
+        toCoordToken(latitude),
+        toCoordToken(longitude),
+      ].join("|");
     };
 
     const isBlank = (value) => {

@@ -191,30 +191,30 @@ function startManagedChildProcess({
   return childProcess;
 }
 
-function startBridgeProcess() {
-  if (bridgeProcess) {
-    return;
-  }
+// function startBridgeProcess() {
+//   if (bridgeProcess) {
+//     return;
+//   }
 
-  bridgeProcess = startManagedChildProcess({
-    name: 'mqtt-bridge',
-    scriptPath: getBridgeScriptPath(),
-  });
+//   bridgeProcess = startManagedChildProcess({
+//     name: 'mqtt-bridge',
+//     scriptPath: getBridgeScriptPath(),
+//   });
 
-  if (!bridgeProcess) {
-    return;
-  }
+//   if (!bridgeProcess) {
+//     return;
+//   }
 
-  bridgeProcess.on('exit', (code, signal) => {
-    console.log(`Bridge process exited (code=${code}, signal=${signal})`);
-    bridgeProcess = null;
-  });
+//   bridgeProcess.on('exit', (code, signal) => {
+//     console.log(`Bridge process exited (code=${code}, signal=${signal})`);
+//     bridgeProcess = null;
+//   });
 
-  bridgeProcess.on('error', (error) => {
-    console.error('Failed to start bridge process:', error.message);
-    bridgeProcess = null;
-  });
-}
+//   bridgeProcess.on('error', (error) => {
+//     console.error('Failed to start bridge process:', error.message);
+//     bridgeProcess = null;
+//   });
+// }
 
 function stopBridgeProcess() {
   if (!bridgeProcess || bridgeProcess.killed) {
@@ -326,7 +326,7 @@ app.whenReady().then(() => {
         'mqtt-broker',
         `Resolved backend ports http=${selectedBackendHttpPort} udp=${selectedBackendUdpPort}`,
       );
-      startBridgeProcess();
+      // startBridgeProcess();
       startBrokerProcess();
       createWindow();
     })
@@ -343,7 +343,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  stopBridgeProcess();
+  // stopBridgeProcess();
   stopBrokerProcess();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -351,6 +351,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  stopBridgeProcess();
+  // stopBridgeProcess();
   stopBrokerProcess();
 });

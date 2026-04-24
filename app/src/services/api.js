@@ -244,6 +244,19 @@ export async function deleteAllData() {
   }
 }
 
+export async function syncAndPullData() {
+  try {
+    const response = await fetch(`${backendHttpUrl}/api/data/sync`, {
+      method: "POST",
+      cache: "no-store",
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function runAerisAnalysis(payload) {
   try {
     const backendReady = await waitForBackendReady({

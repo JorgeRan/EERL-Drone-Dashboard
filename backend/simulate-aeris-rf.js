@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const udpHost = process.env.SIM_AERIS_UDP_HOST || process.env.UDP_HOST || '127.0.0.1';
-const udpPort = Math.max(1, Number(process.env.SIM_AERIS_UDP_PORT || process.env.UDP_PORT || 5000));
+const udpPort = Math.max(1, Number(process.env.SIM_AERIS_UDP_PORT || process.env.UDP_PORT || 54817));
 const publishIntervalMs = Math.max(100, Number(process.env.SIM_AERIS_INTERVAL_MS || 1200));
 const droneId = process.env.SIM_AERIS_DRONE_ID || 'M400-2';
 const topic = process.env.SIM_AERIS_TOPIC || `${droneId}/data`;

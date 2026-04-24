@@ -14,6 +14,7 @@ export const createRemoteMissionStore = ({ missionsTable }) => {
             upsertMission: async () => false,
             deleteMission: async () => false,
             clearMissions: async () => false,
+            fetchAllRemote: async () => null,
             getStatus: () => ({ enabled: false, available: false, initialized: false, lastError: null }),
         };
     }
@@ -144,12 +145,31 @@ export const createRemoteMissionStore = ({ missionsTable }) => {
         await remoteSql.unsafe(`DELETE FROM ${missionsTable}`);
     });
 
+    const fetchAllRemote = async () => {
+        const isReady = await initialize();
+        if (!isReady) {
+            return null;
+        }
+
+        try {
+            const rows = await remoteSql.unsafe(
+                `SELECT id, name, created_at, elapsed_seconds, results FROM ${missionsTable} ORDER BY created_at ASC`,
+            );
+            markRemoteAvailable();
+            return rows;
+        } catch (error) {
+            markRemoteFailure(error, 'fetch');
+            return null;
+        }
+    };
+
     return {
         enabled: true,
         initialize,
         upsertMission,
         deleteMission,
         clearMissions,
+        fetchAllRemote,
         getStatus: () => ({
             enabled: true,
             available,

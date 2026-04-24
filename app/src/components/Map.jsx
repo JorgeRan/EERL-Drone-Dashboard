@@ -35,10 +35,45 @@ const latitude = traceOrigin.latitude;
 const longitude = traceOrigin.longitude;
 const altitude = traceOrigin.altitude;
 const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
+const DRONE_COLOR_BY_ID = {
+  M350: "#f97316",
+  "M400-1": "#22c55e",
+  "M400-2": "#3b82f6",
+};
+const DRONE_COLOR_FALLBACK_PALETTE = [
+  "#f97316",
+  "#22c55e",
+  "#3b82f6",
+  "#ef4444",
+  "#a855f7",
+  "#06b6d4",
+  "#eab308",
+  "#14b8a6",
+];
 
 const toFiniteNumber = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+};
+
+const getDroneColor = (droneId) => {
+  const normalizedDroneId = String(droneId || "").trim();
+  if (!normalizedDroneId) {
+    return color.fligthpathOrange;
+  }
+
+  const knownColor = DRONE_COLOR_BY_ID[normalizedDroneId];
+  if (knownColor) {
+    return knownColor;
+  }
+
+  const hash = [...normalizedDroneId].reduce(
+    (total, char) => total + char.charCodeAt(0),
+    0,
+  );
+  return DRONE_COLOR_FALLBACK_PALETTE[
+    hash % DRONE_COLOR_FALLBACK_PALETTE.length
+  ];
 };
 
 const normalizeDroneState = (entry) => ({
@@ -60,9 +95,31 @@ const normalizeDroneState = (entry) => ({
   payload: entry.payload || {},
 });
 
-const buildDroneFeatureCollection = (drones) => ({
+const buildVisibleDroneIdSet = (visibleDroneIds) =>
+  new Set(
+    (Array.isArray(visibleDroneIds) ? visibleDroneIds : [])
+      .map((droneId) => String(droneId || "").trim())
+      .filter(Boolean),
+  );
+
+const isDroneVisible = (droneId, visibleDroneIdSet, hasVisibilityFilter) => {
+  if (!hasVisibilityFilter) {
+    return true;
+  }
+
+  return visibleDroneIdSet.has(String(droneId || "").trim());
+};
+
+const buildDroneFeatureCollection = (
+  drones,
+  visibleDroneIdSet,
+  hasVisibilityFilter,
+) => ({
   type: "FeatureCollection",
   features: drones
+    .filter((drone) =>
+      isDroneVisible(drone.drone_id, visibleDroneIdSet, hasVisibilityFilter),
+    )
     .filter(
       (drone) =>
         Number.isFinite(drone.longitude) && Number.isFinite(drone.latitude),
@@ -75,6 +132,7 @@ const buildDroneFeatureCollection = (drones) => ({
       },
       properties: {
         droneId: drone.drone_id,
+        markerColor: getDroneColor(drone.drone_id),
         topic: drone.topic,
         altitude: drone.altitude,
         battery: drone.battery,
@@ -148,6 +206,8 @@ const buildTraceFlightPathFeatureCollection = (traceDataset) => {
 const buildLiveFlightPathFeatureCollection = (
   droneTrackHistory,
   selectedDroneId,
+  visibleDroneIdSet,
+  hasVisibilityFilter,
 ) => {
   const showAllDrones = isAllDroneSelection(selectedDroneId);
   const features = Object.entries(droneTrackHistory || {})
@@ -156,7 +216,11 @@ const buildLiveFlightPathFeatureCollection = (
         return false;
       }
 
-      return showAllDrones || droneId === selectedDroneId;
+      if (!isDroneVisible(droneId, visibleDroneIdSet, hasVisibilityFilter)) {
+        return false;
+      }
+
+      return hasVisibilityFilter ? true : showAllDrones || droneId === selectedDroneId;
     })
     .map(([droneId, coordinates]) => ({
       type: "Feature",
@@ -167,6 +231,7 @@ const buildLiveFlightPathFeatureCollection = (
       properties: {
         id: `flight-path-${droneId}`,
         droneId,
+        pathColor: getDroneColor(droneId),
       },
     }));
 
@@ -176,9 +241,21 @@ const buildLiveFlightPathFeatureCollection = (
   };
 };
 
-const buildDisplayedTraceDataset = (traceDataset, showTargetMarkers) => ({
+const buildDisplayedTraceDataset = (
+  traceDataset,
+  showTargetMarkers,
+  visibleDroneIdSet,
+  hasVisibilityFilter,
+) => ({
   type: "FeatureCollection",
   features: (traceDataset?.features || [])
+    .filter((feature) =>
+      isDroneVisible(
+        feature?.properties?.droneId,
+        visibleDroneIdSet,
+        hasVisibilityFilter,
+      ),
+    )
     .map((feature) => {
       const properties = feature?.properties || {};
       const sourceLongitude = toFiniteNumber(properties.sourceLongitude);
@@ -262,14 +339,58 @@ const fitMapToTraceDataset = (
   });
 };
 
+const fitMapToDroneStates = (
+  map,
+  drones,
+  { padding = 60, duration = 700, maxZoom = 17 } = {},
+) => {
+  if (!map || !Array.isArray(drones) || drones.length === 0) {
+    return false;
+  }
+
+  const bounds = new mapboxgl.LngLatBounds();
+  let hasValidPoints = false;
+
+  drones.forEach((drone) => {
+    const lng = Number(drone?.longitude);
+    const lat = Number(drone?.latitude);
+
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      bounds.extend([lng, lat]);
+      hasValidPoints = true;
+    }
+  });
+
+  if (!hasValidPoints) {
+    return false;
+  }
+
+  map.fitBounds(bounds, {
+    padding,
+    duration,
+    maxZoom,
+    essential: true,
+  });
+
+  return true;
+};
+
 export function Map({
   traceDataset,
   onScaleChange,
   selectedDroneId,
+  visibleDroneIds,
+  devices = [],
+  showAllPlottedData = true,
+  onToggleAllPlottedData,
+  droneVisibilityById = {},
+  onToggleDroneVisibility,
   resultsPageMode,
   heatmapEnabled = true,
   plumeViewEnabled = false,
   traceOpacity = 1,
+  onToggleHeatmap,
+  onTogglePlumeView,
   onPlumeViewAutoChange,
   missionConfiguration,
 }) {
@@ -311,21 +432,63 @@ export function Map({
     () => buildMethanePlumeDataset(traceDataset),
     [traceDataset],
   );
+  const visibleDroneIdSet = useMemo(
+    () => buildVisibleDroneIdSet(visibleDroneIds),
+    [visibleDroneIds],
+  );
+  const hasVisibilityFilter = Array.isArray(visibleDroneIds);
   const displayedTraceDataset = useMemo(
-    () => buildDisplayedTraceDataset(traceDataset, showTargetMarkers),
-    [showTargetMarkers, traceDataset],
+    () =>
+      buildDisplayedTraceDataset(
+        traceDataset,
+        showTargetMarkers,
+        visibleDroneIdSet,
+        hasVisibilityFilter,
+      ),
+    [
+      hasVisibilityFilter,
+      showTargetMarkers,
+      traceDataset,
+      visibleDroneIdSet,
+    ],
   );
   const flightPathDataset = useMemo(
     () =>
       resultsPageMode
         ? buildTraceFlightPathFeatureCollection(traceDataset)
-        : buildLiveFlightPathFeatureCollection(droneTrackHistory, selectedDroneId),
-    [droneTrackHistory, resultsPageMode, selectedDroneId, traceDataset],
+        : buildLiveFlightPathFeatureCollection(
+          droneTrackHistory,
+          selectedDroneId,
+          visibleDroneIdSet,
+          hasVisibilityFilter,
+        ),
+    [
+      droneTrackHistory,
+      hasVisibilityFilter,
+      resultsPageMode,
+      selectedDroneId,
+      traceDataset,
+      visibleDroneIdSet,
+    ],
   );
   const focusedDrone =
-    droneStates.find((drone) => drone.drone_id === selectedDroneId) ||
+    droneStates.find(
+      (drone) =>
+        drone.drone_id === selectedDroneId &&
+        isDroneVisible(drone.drone_id, visibleDroneIdSet, hasVisibilityFilter),
+    ) ||
+    droneStates.find((drone) =>
+      isDroneVisible(drone.drone_id, visibleDroneIdSet, hasVisibilityFilter),
+    ) ||
     droneStates[0] ||
     null;
+  const visibleDroneStates = useMemo(
+    () =>
+      droneStates.filter((drone) =>
+        isDroneVisible(drone.drone_id, visibleDroneIdSet, hasVisibilityFilter),
+      ),
+    [droneStates, hasVisibilityFilter, visibleDroneIdSet],
+  );
   const displayLatitude = Number.isFinite(focusedDrone?.latitude)
     ? focusedDrone.latitude
     : latitude;
@@ -408,9 +571,9 @@ export function Map({
       style: isOnlineMode
         ? "mapbox://styles/mapbox/satellite-streets-v12"
         : buildOfflineSatelliteStyle({
-            imageUrl: satelliteImage,
-            coordinates: offlineCoordinates,
-          }),
+          imageUrl: satelliteImage,
+          coordinates: offlineCoordinates,
+        }),
       center: [displayLongitude, displayLatitude],
       zoom: 18,
       pitch: 0,
@@ -691,7 +854,11 @@ export function Map({
           "line-join": "round",
         },
         paint: {
-          "line-color": color.fligthpathOrange,
+          "line-color": [
+            "coalesce",
+            ["get", "pathColor"],
+            color.fligthpathOrange,
+          ],
           "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2, 18, 4],
           "line-opacity": 0,
           "line-blur": 0.15,
@@ -703,7 +870,7 @@ export function Map({
         type: "circle",
         source: "live-drones",
         paint: {
-          "circle-color": color.orange,
+          "circle-color": ["coalesce", ["get", "markerColor"], color.orange],
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 5, 18, 9],
           "circle-stroke-width": 1.4,
           "circle-stroke-color": "#ffffff",
@@ -760,18 +927,16 @@ export function Map({
                             <div style="min-width: 148px; color: #e5eef8;">
                                 <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: #9fb0c2;">Sample ${sampleIndex}</div>
                                 <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">${displayMetricLabel || (isAerisTrace ? "CH4" : "Purway")} ${Number(methane ?? 0).toFixed(2)} ${displayMetricUnits || (isAerisTrace ? "ppm" : "ppm-m")}</div>
-                                ${
-                                  isAerisTrace
-                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
-                                    : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
-                                }
-                                ${
-                                  isAerisTrace
-                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${Number(acetylene ?? 0).toFixed(2)} ppm</div>
+                                ${isAerisTrace
+                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
+                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
+              }
+                                ${isAerisTrace
+                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${Number(acetylene ?? 0).toFixed(2)} ppm</div>
                                 <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Nitrous Oxide ${Number(nitrousOxide ?? 0).toFixed(2)} ppm</div>`
-                                    : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
+                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
                                   <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${Number(purway ?? 0).toFixed(2)} ppm-m</div>`
-                                }
+              }
                                 <div style="margin-top: 4px; font-size: 12px; color: #d2dce8;">Altitude ${Number(pointAltitude).toFixed(0)} m</div>
                                 <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">Flight mark ${timeLabel}</div>
                             </div>
@@ -822,13 +987,12 @@ export function Map({
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Battery ${battery ?? "-"}%</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Speed ${speed ?? "-"} m/s</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${methane ?? "-"} ppm</div>
-                            ${
-                              isAerisDrone
-                                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${acetylene ?? "-"} ppm</div>
+                            ${isAerisDrone
+              ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${acetylene ?? "-"} ppm</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Nitrous Oxide ${nitrousOxide ?? "-"} ppm</div>`
-                                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? "-"} ppm-m</div>
+              : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? "-"} ppm-m</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${sniffer ?? "-"} ppm</div>`
-                            }
+            }
                             <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">${ts ? new Date(ts).toLocaleString() : ""}</div>
                         </div>
                     `,
@@ -897,6 +1061,25 @@ export function Map({
       return;
     }
 
+    const currentMap = mapRef.current;
+    if (!currentMap) {
+      return;
+    }
+
+    if (visibleDroneStates.length > 1) {
+      fitMapToDroneStates(currentMap, visibleDroneStates, {
+        padding: 80,
+        duration: 900,
+        maxZoom: 17,
+      });
+
+      primaryMarkerRef.current?.setLngLat([
+        displayTargetLongitude,
+        displayTargetLatitude,
+      ]);
+      return;
+    }
+
     if (
       !focusedDrone ||
       !Number.isFinite(displayLatitude) ||
@@ -905,20 +1088,25 @@ export function Map({
       return;
     }
 
-    const currentMap = mapRef.current;
-    if (currentMap) {
-      currentMap.easeTo({
-        center: [displayLongitude, displayLatitude],
-        duration: 900,
-        essential: true,
-      });
-    }
+    currentMap.easeTo({
+      center: [displayLongitude, displayLatitude],
+      duration: 900,
+      essential: true,
+    });
 
     primaryMarkerRef.current?.setLngLat([
       displayTargetLongitude,
       displayTargetLatitude,
     ]);
-  }, [displayLatitude, displayLongitude, focusedDrone, resultsPageMode]);
+  }, [
+    displayLatitude,
+    displayLongitude,
+    displayTargetLatitude,
+    displayTargetLongitude,
+    focusedDrone,
+    resultsPageMode,
+    visibleDroneStates,
+  ]);
 
   useEffect(() => {
     const nextUpperLimit = Math.max(
@@ -981,7 +1169,7 @@ export function Map({
 
     const startHeatmapOpacity = Number(
       currentMap.getPaintProperty("methane-trace-heatmap", "heatmap-opacity") ??
-        0,
+      0,
     );
     const startZeroOpacity = Number(
       currentMap.getPaintProperty(
@@ -997,7 +1185,7 @@ export function Map({
     );
     const startHotspotOpacity = Number(
       currentMap.getPaintProperty("methane-trace-hotspots", "circle-opacity") ??
-        0.8,
+      0.8,
     );
     const startHotspotStrokeOpacity = Number(
       currentMap.getPaintProperty(
@@ -1007,7 +1195,7 @@ export function Map({
     );
     const startHaloOpacity = Number(
       currentMap.getPaintProperty("methane-trace-halo", "circle-opacity") ??
-        0.36,
+      0.36,
     );
 
     const targetHeatmapOpacity = resultsPageMode
@@ -1066,7 +1254,7 @@ export function Map({
         "methane-trace-heatmap",
         "heatmap-opacity",
         startHeatmapOpacity +
-          (targetHeatmapOpacity - startHeatmapOpacity) * eased,
+        (targetHeatmapOpacity - startHeatmapOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-zero-points",
@@ -1077,19 +1265,19 @@ export function Map({
         "methane-trace-zero-points",
         "circle-stroke-opacity",
         startZeroStrokeOpacity +
-          (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
+        (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-opacity",
         startHotspotOpacity +
-          (targetHotspotOpacity - startHotspotOpacity) * eased,
+        (targetHotspotOpacity - startHotspotOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-stroke-opacity",
         startHotspotStrokeOpacity +
-          (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
+        (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-halo",
@@ -1105,7 +1293,7 @@ export function Map({
         "methane-plume-caps",
         "line-opacity",
         startPlumeCapsOpacity +
-          (targetPlumeCapsOpacity - startPlumeCapsOpacity) * eased,
+        (targetPlumeCapsOpacity - startPlumeCapsOpacity) * eased,
       );
 
       if (progress < 1) {
@@ -1152,13 +1340,24 @@ export function Map({
     const flightPathSource = currentMap?.getSource("flight-path");
 
     if (liveDroneSource) {
-      liveDroneSource.setData(buildDroneFeatureCollection(droneStates));
+      liveDroneSource.setData(
+        buildDroneFeatureCollection(
+          droneStates,
+          visibleDroneIdSet,
+          hasVisibilityFilter,
+        ),
+      );
     }
 
     if (flightPathSource) {
       flightPathSource.setData(flightPathDataset);
     }
-  }, [droneStates, flightPathDataset]);
+  }, [
+    droneStates,
+    flightPathDataset,
+    hasVisibilityFilter,
+    visibleDroneIdSet,
+  ]);
 
   useEffect(() => {
     const currentMap = mapRef.current;
@@ -1250,7 +1449,7 @@ export function Map({
             return history;
           }, {}),
         );
-      } catch {}
+      } catch { }
     };
 
     const connectTelemetrySocket = () => {
@@ -1289,7 +1488,7 @@ export function Map({
             }
 
             upsertDroneState(packet.data);
-          } catch {}
+          } catch { }
         };
       } catch {
         setIsTelemetryConnected(false);
@@ -1387,9 +1586,16 @@ export function Map({
       style={{ backgroundColor: color.card, padding: "0.5rem" }}
     >
       <div className="flex h-full w-full flex-col gap-3">
-        <div className="grid grid-cols-2 justify-between">
+        <div
+          className={`grid grid-cols-1 gap-3 xl:items-start ${
+            resultsPageMode
+              ? "xl:grid-cols-1"
+              : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
+          }`}
+        >
           {!resultsPageMode ? (
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center justify-start gap-3 rounded-lg  px-3 py-2"
+            >
               <div>
                 <p
                   className="text-xs uppercase tracking-[0.18em]"
@@ -1403,35 +1609,129 @@ export function Map({
                 >
                   Drone satellite view
                 </p>
+
               </div>
             </div>
           ) : null}
-          <div className="flex flex-row gap-7">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowFlightPath((previous) => !previous)}
-              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showFlightPath ? "bg-green-600" : "bg-gray-300"}`}
-            >
-              <span
-                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showFlightPath ? "translate-x-5" : "translate-x-0"}`}
-              />
-            </button>
-            <span className="">Flight Path</span>
-          </div>
-          {missionConfiguration !== SENSOR_MODE_AERIS ? (
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowTargetMarkers((previous) => !previous)}
-              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showTargetMarkers ? "bg-green-600" : "bg-gray-300"}`}
-            >
-              <span
-                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showTargetMarkers ? "translate-x-5" : "translate-x-0"}`}
-              />
-            </button>
-            <span className="">Target Markers</span>
-          </div>) : null}
+          <div className="flex flex-col gap-2 rounded-lg border px-3 py-2 "
+            style={{ backgroundColor: color.surface, borderColor: color.border }}
+          >
+            {!resultsPageMode ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onToggleAllPlottedData?.()}
+                  className="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none"
+                  style={{
+                    backgroundColor: showAllPlottedData
+                      ? color.green
+                      : color.borderStrong,
+                  }}
+                  aria-label="Toggle all map plotted data"
+                >
+                  <span
+                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showAllPlottedData ? "translate-x-5" : "translate-x-0"}`}
+                  />
+                </button>
+                <span className="text-sm font-semibold" style={{ color: color.text }}>
+                  Map Data
+                </span>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {devices.map((device) => {
+                    const isVisible =
+                      showAllPlottedData &&
+                      droneVisibilityById[device.id] !== false;
+                    const deviceColor = getDroneColor(device.id);
+
+                    return (
+                      <button
+                        key={device.id}
+                        type="button"
+                        onClick={() => onToggleDroneVisibility?.(device.id)}
+                        className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                        style={{
+                          backgroundColor: isVisible
+                            ? `${deviceColor}22`
+                            : color.card,
+                          borderColor: isVisible ? deviceColor : color.border,
+                          color: isVisible ? color.text : color.textMuted,
+                        }}
+                      >
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: deviceColor }}
+                        />
+                        {device.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex w-full flex-row flex-nowrap items-center justify-between gap-5 whitespace-nowrap pt-1">
+              {resultsPageMode ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onToggleHeatmap?.()}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${heatmapEnabled ? "bg-sky-500" : "bg-gray-300"}`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${heatmapEnabled ? "translate-x-5" : "translate-x-0"}`}
+                    />
+                  </button>
+                  <span className="text-sm" style={{ color: color.textMuted }}>
+                    Heatmap
+                  </span>
+                </div>
+              ) : null}
+
+              {resultsPageMode ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onTogglePlumeView?.()}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${plumeViewEnabled ? "bg-green-600" : "bg-gray-300"}`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${plumeViewEnabled ? "translate-x-5" : "translate-x-0"}`}
+                    />
+                  </button>
+                  <span className="text-sm" style={{ color: color.textMuted }}>
+                    Plume View
+                  </span>
+                </div>
+              ) : null}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowFlightPath((previous) => !previous)}
+                  className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showFlightPath ? "bg-orange-500" : "bg-gray-300"}`}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showFlightPath ? "translate-x-5" : "translate-x-0"}`}
+                  />
+                </button>
+                <span className="text-sm" style={{ color: color.textMuted }}>Flight Path</span>
+              </div>
+              {missionConfiguration === SENSOR_MODE_AERIS ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowTargetMarkers((previous) => !previous)}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showTargetMarkers ? "bg-yellow-400" : "bg-gray-300"}`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showTargetMarkers ? "translate-x-5" : "translate-x-0"}`}
+                    />
+                  </button>
+                  <span className="text-sm" style={{ color: color.textMuted }}>Target Markers</span>
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
         <div className="flex flex-row justify-between items-center">

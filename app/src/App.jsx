@@ -36,6 +36,7 @@ import {
   pauseMeasurement,
   resumeMeasurement,
   saveMission,
+  syncAndPullData,
   startMeasurement,
   stopMeasurement,
   updateMission,
@@ -157,6 +158,7 @@ const buildFlowDataFromHistory = (historyRows) => {
     const timestampMs = new Date(row.ts || Date.now()).getTime();
 
     return {
+      droneId: row.drone_id || row.droneId || null,
       sampleOrder: index,
       sampleIndex: index + 1,
       timestampMs,
@@ -189,6 +191,7 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
   const timestampMs = new Date(telemetryRow.ts || Date.now()).getTime();
 
   return {
+    droneId: telemetryRow.drone_id || telemetryRow.droneId || null,
     sampleOrder,
     sampleIndex: sampleOrder + 1,
     timestampMs,
@@ -249,7 +252,8 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           coordinates: [displayLongitude, displayLatitude],
         },
         properties: {
-          id: `trace-${point.sampleOrder}`,
+          id: `trace-${point.droneId || "drone"}-${point.timestampMs || point.sampleOrder}`,
+          droneId: point.droneId || null,
           sampleOrder: point.sampleOrder,
           sampleIndex: point.sampleIndex,
           timestampMs: point.timestampMs,
@@ -294,6 +298,44 @@ const appendFlowPoint = (series, telemetryRow) => {
     }));
 };
 
+const buildCombinedFlowDataForDrones = ({
+  devices,
+  measurementTraceByDrone,
+  liveTelemetryByDrone,
+  recordedFlowDataByDrone,
+  visibleDroneIds,
+}) => {
+  const visibleIdSet = new Set(
+    (Array.isArray(visibleDroneIds) ? visibleDroneIds : [])
+      .map((droneId) => String(droneId || "").trim())
+      .filter(Boolean),
+  );
+
+  return devices
+    .filter((device) => visibleIdSet.has(device.id))
+    .flatMap((device) => {
+      const measurementSeries = measurementTraceByDrone[device.id] || [];
+      const liveSeries = liveTelemetryByDrone[device.id] || [];
+      const recordedSeries = recordedFlowDataByDrone[device.id] || [];
+      const activeSeries = measurementSeries.length
+        ? measurementSeries
+        : liveSeries.length
+          ? liveSeries
+          : recordedSeries;
+
+      return activeSeries.map((point) => ({
+        ...point,
+        droneId: point.droneId || device.id,
+      }));
+    })
+    .sort((left, right) => left.timestampMs - right.timestampMs)
+    .map((point, index) => ({
+      ...point,
+      sampleOrder: index,
+      sampleIndex: index + 1,
+    }));
+};
+
 const HOLD_DELAY = 2000;
 const MOVEMENT_THRESHOLD_METERS = 1.5;
 const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
@@ -322,6 +364,13 @@ function App() {
   const deleteHoldRafRef = useRef(null);
 
   const [telemetrySource, setTelemetrySource] = useState("MQTT");
+  const [showDashboardPlotData, setShowDashboardPlotData] = useState(true);
+  const [dashboardDroneVisibility, setDashboardDroneVisibility] = useState(() =>
+    devices.reduce((accumulator, device) => {
+      accumulator[device.id] = true;
+      return accumulator;
+    }, {}),
+  );
   const [legendScale, setLegendScale] = useState({
     lowerLimit: 0,
     upperLimit: 5,
@@ -607,6 +656,33 @@ function App() {
     () => filterTraceDatasetBySelection(activeTraceDataset, selectedWindow),
     [activeTraceDataset, selectedWindow],
   );
+  const visibleDashboardDroneIds = useMemo(() => {
+    if (!showDashboardPlotData) {
+      return [];
+    }
+
+    return devices
+      .filter((device) => dashboardDroneVisibility[device.id] !== false)
+      .map((device) => device.id);
+  }, [dashboardDroneVisibility, showDashboardPlotData]);
+  const dashboardMapTraceDataset = useMemo(
+    () =>
+      buildTraceDatasetFromFlowData(
+        buildCombinedFlowDataForDrones({
+          devices,
+          measurementTraceByDrone,
+          liveTelemetryByDrone,
+          recordedFlowDataByDrone,
+          visibleDroneIds: visibleDashboardDroneIds,
+        }),
+      ),
+    [
+      measurementTraceByDrone,
+      liveTelemetryByDrone,
+      recordedFlowDataByDrone,
+      visibleDashboardDroneIds,
+    ],
+  );
 
   const windSamples = useMemo(
     () =>
@@ -672,6 +748,8 @@ function App() {
   );
 
   const reloadAllHistory = useCallback(async () => {
+    await syncAndPullData();
+
     const refreshResults = await Promise.all(
       devices.map((device) => reloadHistory(device.id)),
     );
@@ -698,6 +776,12 @@ function App() {
       inferFlowSensorMode(liveFlowData)
     );
   }, [detectedSensorModeByDrone, liveFlowData, selectedDeviceId]);
+  const handleToggleDashboardDroneVisibility = useCallback((droneId) => {
+    setDashboardDroneVisibility((previous) => ({
+      ...previous,
+      [droneId]: previous[droneId] === false,
+    }));
+  }, []);
   const missionDroneIds = useMemo(
     () =>
       devices
@@ -1231,9 +1315,17 @@ function App() {
 
               <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]">
                 <Map
-                  traceDataset={filteredTraceDataset}
+                  traceDataset={dashboardMapTraceDataset}
                   onScaleChange={setLegendScale}
                   selectedDroneId={selectedDeviceId}
+                  visibleDroneIds={visibleDashboardDroneIds}
+                  devices={devices}
+                  showAllPlottedData={showDashboardPlotData}
+                  onToggleAllPlottedData={() =>
+                    setShowDashboardPlotData((previous) => !previous)
+                  }
+                  droneVisibilityById={dashboardDroneVisibility}
+                  onToggleDroneVisibility={handleToggleDashboardDroneVisibility}
                   resultsPageMode={false}
                   missionConfiguration={activeSensorMode}
                 />

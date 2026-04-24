@@ -442,24 +442,46 @@ const parseStandardCsvToMissionResults = (
 const findHeaderIndex = (headers, matcher) =>
   headers.findIndex((header) => matcher(normalizeHeader(header)));
 
-const hasFiniteCoordinates = (state) =>
-  Number.isFinite(state?.latitude) && Number.isFinite(state?.longitude);
+const normalizeCoordinatePair = (latitude, longitude) => {
+  const hasLatitude = Number.isFinite(latitude);
+  const hasLongitude = Number.isFinite(longitude);
 
-const buildAerisSnapshotPoint = (timestamp, sensorMode, state) => {
-  if (!hasFiniteCoordinates(state)) {
-    return null;
+  if (!hasLatitude && !hasLongitude) {
+    return { latitude: null, longitude: null };
   }
 
+  if (
+    !hasLatitude ||
+    !hasLongitude ||
+    !isValidLatitude(latitude) ||
+    !isValidLongitude(longitude) ||
+    hasOriginCoordinatePair(latitude, longitude)
+  ) {
+    return { latitude: null, longitude: null };
+  }
+
+  return { latitude, longitude };
+};
+
+const buildAerisSnapshotPoint = (timestamp, sensorMode, state) => {
   const point = {
     timestampIso: timestamp.timestampIso,
     timestampMs: timestamp.timestampMs,
     sensorMode,
-    latitude: state.latitude,
-    longitude: state.longitude,
     payload: {
       sensorMode,
     },
   };
+
+  if (Number.isFinite(state?.latitude)) {
+    point.latitude = state.latitude;
+    point.payload.latitude = state.latitude;
+  }
+
+  if (Number.isFinite(state?.longitude)) {
+    point.longitude = state.longitude;
+    point.payload.longitude = state.longitude;
+  }
 
   const optionalFields = {
     methane: state.methane,
@@ -551,9 +573,13 @@ const parseAerisCsvToMissionResults = (
       acetyleneIdx !== -1 ? parseNumber(cols[acetyleneIdx]) : null;
     const nitrousOxide =
       nitrousOxideIdx !== -1 ? parseNumber(cols[nitrousOxideIdx]) : null;
-    const latitude = latitudeIdx !== -1 ? parseNumber(cols[latitudeIdx]) : null;
-    const longitude =
+    const rawLatitude = latitudeIdx !== -1 ? parseNumber(cols[latitudeIdx]) : null;
+    const rawLongitude =
       longitudeIdx !== -1 ? parseNumber(cols[longitudeIdx]) : null;
+    const normalizedCoordinates = normalizeCoordinatePair(
+      rawLatitude,
+      rawLongitude,
+    );
     const altitude = altitudeIdx !== -1 ? parseNumber(cols[altitudeIdx]) : null;
     const windU = windUIdx !== -1 ? parseNumber(cols[windUIdx]) : null;
     const windV = windVIdx !== -1 ? parseNumber(cols[windVIdx]) : null;
@@ -563,8 +589,8 @@ const parseAerisCsvToMissionResults = (
       methane,
       acetylene: acetylenePpb !== null ? acetylenePpb / 1000 : null,
       nitrousOxide,
-      latitude,
-      longitude,
+      latitude: normalizedCoordinates.latitude,
+      longitude: normalizedCoordinates.longitude,
       altitude,
       wind_u: windU,
       wind_v: windV,

@@ -2235,49 +2235,6 @@ export function ResultsPage({
                   />
                 </svg>
               </div>
-              <div className="flex items-center gap-4 mr-4">
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      if (!selectedMissionId) {
-                        return;
-                      }
-
-                      setHeatmapViewByMission((previous) => ({
-                        ...previous,
-                        [selectedMissionId]: !(
-                          previous[selectedMissionId] ?? true
-                        ),
-                      }));
-                    }}
-                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${isHeatmapEnabled ? "bg-sky-500" : "bg-gray-300"}`}
-                  >
-                    <span
-                      className={`translate-x-0 inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${isHeatmapEnabled ? "translate-x-5" : ""}`}
-                    />
-                  </button>
-                  <span className="">Heatmap</span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      setPlumeViewByMission((previous) => ({
-                        ...previous,
-                        [selectedMissionId]: !(
-                          previous[selectedMissionId] ?? false
-                        ),
-                      }));
-                    }}
-                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${isPlumeViewEnabled ? "bg-green-600" : "bg-gray-300"}`}
-                  >
-                    <span
-                      className={`translate-x-0 inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${isPlumeViewEnabled ? "translate-x-5" : ""}`}
-                    />
-                  </button>
-                  <span className="">Plume View</span>
-                </div>
-              </div>
               <div
                 className="flex items-center gap-2 text-xs"
                 style={{ color: color.textMuted }}
@@ -2337,6 +2294,26 @@ export function ResultsPage({
                 heatmapEnabled={isHeatmapEnabled}
                 plumeViewEnabled={isPlumeViewEnabled}
                 traceOpacity={traceOpacity}
+                onToggleHeatmap={() => {
+                  if (!selectedMissionId) {
+                    return;
+                  }
+
+                  setHeatmapViewByMission((previous) => ({
+                    ...previous,
+                    [selectedMissionId]: !(previous[selectedMissionId] ?? true),
+                  }));
+                }}
+                onTogglePlumeView={() => {
+                  if (!selectedMissionId) {
+                    return;
+                  }
+
+                  setPlumeViewByMission((previous) => ({
+                    ...previous,
+                    [selectedMissionId]: !(previous[selectedMissionId] ?? false),
+                  }));
+                }}
                 onPlumeViewAutoChange={(enabled) => {
                   if (!selectedMissionId) {
                     return;
@@ -2353,7 +2330,8 @@ export function ResultsPage({
                     };
                   });
                 }}
-                missionConfiguration={selectedSensorMode}
+                missionConfiguration={
+                  sensorsMode}
               />
             </div>
             <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />

@@ -395,8 +395,17 @@ const createNotebookInputPayload = (body = {}) => {
 
 const runAerisNotebook = async (inputPayload = null) => {
   console.log("Running Aeris Notebook");
-  const notebookPath = path.join(__dirname, AERIS_NOTEBOOK_FILE);
-  const notebookInputPath = path.join(__dirname, AERIS_NOTEBOOK_INPUT_FILE);
+  const analysisDirCandidates = [
+    path.join(__dirname, "analysis"),
+    path.join(__dirname, "..", "analysis"),
+    path.join(__dirname, "..", "..", "analysis"),
+  ];
+  const analysisDir =
+    analysisDirCandidates.find((candidate) => existsSync(candidate)) ||
+    analysisDirCandidates[0];
+  const notebookPath = path.join(analysisDir, AERIS_NOTEBOOK_FILE);
+  const notebookInputPath = path.join(analysisDir, AERIS_NOTEBOOK_INPUT_FILE);
+  const dataBrokerPath = path.join(analysisDir, AERIS_DATA_BROKER_FILE);
   let brokerResult = null;
   const bundledVenvDir = path.join(__dirname, ".venv");
   const bundledPythonCandidates = process.platform === "win32"
@@ -436,13 +445,13 @@ const runAerisNotebook = async (inputPayload = null) => {
         const brokerRun = await runCommand({
           command: pythonCommand,
           args: [
-            AERIS_DATA_BROKER_FILE,
+            dataBrokerPath,
             "--limit",
             String(AERIS_NOTEBOOK_SAMPLE_LIMIT),
             "--output",
-            AERIS_NOTEBOOK_INPUT_FILE,
+            notebookInputPath,
           ],
-          cwd: __dirname,
+          cwd: analysisDir,
           timeoutMs: AERIS_NOTEBOOK_TIMEOUT_MS,
         });
 
@@ -472,9 +481,9 @@ const runAerisNotebook = async (inputPayload = null) => {
           "--execute",
           "--inplace",
           "--ExecutePreprocessor.timeout=180",
-          AERIS_NOTEBOOK_FILE,
+          notebookPath,
         ],
-        cwd: __dirname,
+        cwd: analysisDir,
         timeoutMs: AERIS_NOTEBOOK_TIMEOUT_MS,
       });
 
