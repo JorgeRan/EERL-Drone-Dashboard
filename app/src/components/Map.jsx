@@ -246,6 +246,7 @@ const buildDisplayedTraceDataset = (
   showTargetMarkers,
   visibleDroneIdSet,
   hasVisibilityFilter,
+  missionConfiguration = {}
 ) => ({
   type: "FeatureCollection",
   features: (traceDataset?.features || [])
@@ -258,16 +259,27 @@ const buildDisplayedTraceDataset = (
     )
     .map((feature) => {
       const properties = feature?.properties || {};
-      const sourceLongitude = toFiniteNumber(properties.sourceLongitude);
-      const sourceLatitude = toFiniteNumber(properties.sourceLatitude);
-      const targetLongitude = toFiniteNumber(properties.targetLongitude);
-      const targetLatitude = toFiniteNumber(properties.targetLatitude);
-      const longitude = showTargetMarkers
-        ? targetLongitude ?? sourceLongitude
-        : sourceLongitude ?? targetLongitude;
-      const latitude = showTargetMarkers
-        ? targetLatitude ?? sourceLatitude
-        : sourceLatitude ?? targetLatitude;
+      let longitude, latitude, mapCoordinates;
+      if (showTargetMarkers) {
+        const tLon = toFiniteNumber(properties.targetLongitude);
+        const tLat = toFiniteNumber(properties.targetLatitude);
+        const isValidTarget =
+          tLon !== 0 && tLat !== 0 &&
+          Number.isFinite(tLon) && Number.isFinite(tLat);
+        if (isValidTarget) {
+          longitude = tLon;
+          latitude = tLat;
+          mapCoordinates = "target";
+        } else {
+          longitude = toFiniteNumber(properties.sourceLongitude) ?? tLon;
+          latitude = toFiniteNumber(properties.sourceLatitude) ?? tLat;
+          mapCoordinates = "drone";
+        }
+      } else {
+        longitude = toFiniteNumber(properties.sourceLongitude) ?? toFiniteNumber(properties.targetLongitude);
+        latitude = toFiniteNumber(properties.sourceLatitude) ?? toFiniteNumber(properties.targetLatitude);
+        mapCoordinates = "drone";
+      }
 
       if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
         return null;
@@ -281,7 +293,7 @@ const buildDisplayedTraceDataset = (
         },
         properties: {
           ...properties,
-          mapCoordinates: showTargetMarkers ? "target" : "drone",
+          mapCoordinates,
         },
       };
     })
@@ -445,12 +457,14 @@ export function Map({
         showTargetMarkers,
         visibleDroneIdSet,
         hasVisibilityFilter,
+        missionConfiguration
       ),
     [
       hasVisibilityFilter,
       showTargetMarkers,
       traceDataset,
       visibleDroneIdSet,
+      missionConfiguration,
     ],
   );
   const flightPathDataset = useMemo(
@@ -1006,13 +1020,16 @@ export function Map({
         popupRef.current?.remove();
       });
 
-      setShowTargetSwitch(
-        missionConfiguration && typeof missionConfiguration === 'object'
-          ? Object.values(missionConfiguration).some(
-              v => typeof v === 'string' && v.toLowerCase().includes('dual')
-            )
-          : false
-      );
+      // Show the target markers switch only if at least one feature has valid, non-zero target coordinates
+      const hasValidTarget = (initialTraceDatasetRef.current?.features || []).some(f => {
+        const p = f.properties || {};
+        const tLon = toFiniteNumber(p.targetLongitude);
+        const tLat = toFiniteNumber(p.targetLatitude);
+        const tAlt = toFiniteNumber(p.targetAltitude);
+        return tLon !== 0 && tLat !== 0 && tAlt !== 0 &&
+          Number.isFinite(tLon) && Number.isFinite(tLat) && Number.isFinite(tAlt);
+      });
+      setShowTargetSwitch(hasValidTarget);
 
       if (resultsPageMode) {
         fitMapToTraceDataset(map, initialTraceDatasetRef.current, {
@@ -1732,7 +1749,7 @@ export function Map({
                 </button>
                 <span className="text-sm" style={{ color: color.textMuted }}>Flight Path</span>
               </div>
-              {showTargetSwitch && (
+             
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -1745,7 +1762,7 @@ export function Map({
                   </button>
                   <span className="text-sm" style={{ color: color.textMuted }}>Target Markers</span>
                 </div>
-              )}
+            
             </div>
           </div>
         </div>

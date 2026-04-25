@@ -2205,14 +2205,26 @@ app.delete("/api/missions/:id", async (req, res) => {
 
 app.delete("/api/data", async (_req, res) => {
   try {
+    // Delete local data
     await sql.unsafe(`DELETE FROM ${TELEMETRY_TABLE}`);
     const deletedTelemetryRows = await sql.unsafe("SELECT changes() AS count");
-
     await sql.unsafe(`DELETE FROM ${LATEST_STATE_TABLE}`);
     const deletedLatestRows = await sql.unsafe("SELECT changes() AS count");
-
     await sql.unsafe(`DELETE FROM ${MISSIONS_TABLE}`);
     const deletedMissionRows = await sql.unsafe("SELECT changes() AS count");
+
+    // Delete remote (Supabase) data
+    if (remoteMissionStore?.clearMissions) {
+      await remoteMissionStore.clearMissions();
+    }
+    if (remoteTelemetryStore?.enabled && remoteTelemetryStore?.initialize) {
+      const isReady = await remoteTelemetryStore.initialize();
+      if (isReady && remoteTelemetryStore.remoteSql) {
+        // Clear remote telemetry and latest state tables
+        await remoteTelemetryStore.remoteSql.unsafe(`DELETE FROM ${TELEMETRY_TABLE}`);
+        await remoteTelemetryStore.remoteSql.unsafe(`DELETE FROM ${LATEST_STATE_TABLE}`);
+      }
+    }
 
     await queueMissionClear();
     await syncPendingMissionsToRemote();
@@ -2222,6 +2234,7 @@ app.delete("/api/data", async (_req, res) => {
       deletedTelemetry: Number(deletedTelemetryRows?.[0]?.count ?? 0),
       deletedLatestState: Number(deletedLatestRows?.[0]?.count ?? 0),
       deletedMissions: Number(deletedMissionRows?.[0]?.count ?? 0),
+      supabaseCleared: true,
     });
   } catch (error) {
     console.error("Delete all data endpoint error:", error.message);

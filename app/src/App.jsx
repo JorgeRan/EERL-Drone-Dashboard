@@ -218,38 +218,21 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
   type: "FeatureCollection",
   features: filterCoordinateOutliers(datasetFlowData)
     .filter((point) => {
-      const useTargetCoordinates = point.payload?.map_coordinates === "target";
-      const latitude = useTargetCoordinates
-        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
-        : point.latitude;
-      const longitude = useTargetCoordinates
-        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
-        : point.longitude;
-
-      return Number.isFinite(latitude) && Number.isFinite(longitude);
+      // Only check drone coordinates for validity
+      return Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
     })
     .map((point) => {
-      const useTargetCoordinates = point.payload?.map_coordinates === "target";
       const sourceLatitude = point.latitude;
       const sourceLongitude = point.longitude;
-      const targetLatitude =
-        point.target_latitude ?? point.payload?.target_latitude ?? null;
-      const targetLongitude =
-        point.target_longitude ?? point.payload?.target_longitude ?? null;
-      const displayLatitude = useTargetCoordinates
-        ? targetLatitude ?? sourceLatitude
-        : sourceLatitude;
-      const displayLongitude = useTargetCoordinates
-        ? targetLongitude ?? sourceLongitude
-        : sourceLongitude;
+      const targetLatitude = point.target_latitude ?? point.payload?.target_latitude ?? null;
+      const targetLongitude = point.target_longitude ?? point.payload?.target_longitude ?? null;
       const traceDisplayMetric = getTraceDisplayMetric(point);
       const traceValue = traceDisplayMetric.value;
-
       return {
         type: "Feature",
         geometry: {
           type: "Point",
-          coordinates: [displayLongitude, displayLatitude],
+          coordinates: [sourceLongitude, sourceLatitude],
         },
         properties: {
           id: `trace-${point.droneId || "drone"}-${point.timestampMs || point.sampleOrder}`,
@@ -273,7 +256,7 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           sourceLongitude,
           targetLatitude,
           targetLongitude,
-          mapCoordinates: useTargetCoordinates ? "target" : "drone",
+          mapCoordinates: point.payload?.map_coordinates === "target" ? "target" : "drone",
           detected: traceValue > 0,
           pointColor: traceValue > 0 ? "#4ade80" : "#64748b",
         },
@@ -1195,6 +1178,7 @@ function App() {
             onContinueMission={handleContinueMission}
             continuingMissionId={continuingMission?.id || null}
             measurementStatus={measurementStatus}
+            onDataRefresh={reloadAllHistory}
           />
         ) : currentView === "data" ? (
           <DataPage

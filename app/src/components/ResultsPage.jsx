@@ -47,8 +47,6 @@ const DEFAULT_TRANSECT_WIDTH_M = 80.0;
 const DEFAULT_MIXING_HEIGHT_M = 25.0;
 const DELETE_ALL_HOLD_MS = 2000;
 
-let sensorModePresentationCache = {};
-
 const sensorModePresentation = (sensorMode) => {
   if (sensorMode === SENSOR_MODE_AERIS) {
     return {
@@ -140,38 +138,21 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
   type: "FeatureCollection",
   features: filterCoordinateOutliers(datasetFlowData)
     .filter((point) => {
-      const useTargetCoordinates = point.payload?.map_coordinates === "target";
-      const latitude = useTargetCoordinates
-        ? point.target_latitude ?? point.payload?.target_latitude ?? point.latitude
-        : point.latitude;
-      const longitude = useTargetCoordinates
-        ? point.target_longitude ?? point.payload?.target_longitude ?? point.longitude
-        : point.longitude;
-
-      return Number.isFinite(latitude) && Number.isFinite(longitude);
+      // Only check drone coordinates for validity
+      return Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
     })
     .map((point) => {
-      const useTargetCoordinates = point.payload?.map_coordinates === "target";
       const sourceLatitude = point.latitude;
       const sourceLongitude = point.longitude;
-      const targetLatitude =
-        point.target_latitude ?? point.payload?.target_latitude ?? null;
-      const targetLongitude =
-        point.target_longitude ?? point.payload?.target_longitude ?? null;
-      const displayLatitude = useTargetCoordinates
-        ? targetLatitude ?? sourceLatitude
-        : sourceLatitude;
-      const displayLongitude = useTargetCoordinates
-        ? targetLongitude ?? sourceLongitude
-        : sourceLongitude;
+      const targetLatitude = point.target_latitude ?? point.payload?.target_latitude ?? null;
+      const targetLongitude = point.target_longitude ?? point.payload?.target_longitude ?? null;
       const traceDisplayMetric = getTraceDisplayMetric(point);
       const traceValue = traceDisplayMetric.value;
-
       return {
         type: "Feature",
         geometry: {
           type: "Point",
-          coordinates: [displayLongitude, displayLatitude],
+          coordinates: [sourceLongitude, sourceLatitude],
         },
         properties: {
           id: `trace-${point.sampleOrder}`,
@@ -194,7 +175,7 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           sourceLongitude,
           targetLatitude,
           targetLongitude,
-          mapCoordinates: useTargetCoordinates ? "target" : "drone",
+          mapCoordinates: point.payload?.map_coordinates === "target" ? "target" : "drone",
           detected: traceValue > 0,
           pointColor: traceValue > 0 ? "#4ade80" : "#64748b",
         },
@@ -537,9 +518,10 @@ export function ResultsPage({
   onContinueMission,
   continuingMissionId = null,
   measurementStatus = "idle",
+  onDataRefresh,
 }) {
   const [selectedMissionId, setSelectedMissionId] = useState(null);
-  const [selectedMissionConfiguration, setSelectedMissionConfiguration] = useState(null);
+
   const [selectedResultDroneId, setSelectedResultDroneId] =
     useState(ALL_DRONES_OPTION);
   const [missionsSample, setMissionsSample] = useState([]);
@@ -1232,12 +1214,15 @@ export function ResultsPage({
       setSelectedMissionId(ALL_DATA_MISSION_ID);
       setSelectedResultDroneId(ALL_DRONES_OPTION);
       setImportMessage("All recorded data deleted.");
+      if (typeof onDataRefresh === "function") {
+        await onDataRefresh();
+      }
     }
 
     setIsDeletingAllData(false);
     setIsDeleteAllHolding(false);
     setDeleteAllHoldProgress(0);
-  }, [isDeletingAllData]);
+  }, [isDeletingAllData, onDataRefresh]);
 
   const beginDeleteAllHold = useCallback(() => {
     if (isDeletingAllData || isTelemetryHistoryLoading) {
@@ -1633,7 +1618,6 @@ export function ResultsPage({
                     type="button"
                     onClick={() => {
                       setSelectedMissionId(mission.id);
-                      
                       setSelectedResultDroneId(ALL_DRONES_OPTION);
                       onSelectDevice?.(
                         mission.primaryDroneId || selectedDeviceId,
@@ -1869,7 +1853,6 @@ export function ResultsPage({
                     type="button"
                     onClick={() => {
                       setSelectedMissionId(mission.id);
-                      setSelectedMissionConfiguration(mission.droneSensorModeById);
                       setSelectedResultDroneId(ALL_DRONES_OPTION);
                       onSelectDevice?.(
                         mission.primaryDroneId || selectedDeviceId,
@@ -1912,7 +1895,6 @@ export function ResultsPage({
                           const presentation = sensorModePresentation(
                             mission.droneSensorModeById?.[droneId],
                           );
-                          
 
                           return (
                             <span
@@ -2335,7 +2317,8 @@ export function ResultsPage({
                     };
                   });
                 }}
-                missionConfiguration={selectedMissionConfiguration && typeof selectedMissionConfiguration === 'object' ? selectedMissionConfiguration : {}}
+                missionConfiguration={
+                  sensorsMode}
               />
             </div>
             <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />
@@ -2683,6 +2666,3 @@ export function ResultsPage({
     </div>
   );
 }
-
-
-

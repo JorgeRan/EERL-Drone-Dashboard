@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-24T19:45:21.781Z",
+  "generatedAt": "2026-04-25T17:06:24.517Z",
   "source": "ui-analysis-request",
   "sampleCount": 5208,
   "selection": {
@@ -10,13 +10,13 @@
     "sampleCount": 5208
   },
   "mission": {
-    "id": "mission-1777059901062",
+    "id": "mission-1777136766452",
     "name": "LOG_0_2026-02-27_163418-0500",
     "droneId": null
   },
   "tracerReleaseRates": {
-    "acetylene": 10,
-    "nitrousOxide": null
+    "acetylene": null,
+    "nitrousOxide": 10
   },
   "samples": [
     {
