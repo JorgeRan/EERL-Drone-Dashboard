@@ -143,7 +143,7 @@ export function buildMethanePlumeDataset(traceDataset) {
             const lonOffset = metersToLongitudeDegrees(footprintRadiusMeters, sampleLat)
             const altitudeBand = altitude - minimumAltitude
             const baseHeight = 0
-            const plumeHeight = methane * 0.1
+            const plumeHeight = methane * 0.01
             // const plumeHeight = baseHeight + 10 + methane * 20
 
             return {

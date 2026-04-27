@@ -109,10 +109,15 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const dragHandleRef = useRef(null);
   const dataLength = flowData.length;
   const maxIndex = Math.max(dataLength - 1, 0);
-  const fullLeftAxisPeakValue = Math.max(
-    1,
-    ...flowData.map((point) => point.purway),
-    ...flowData.map((point) => point.methane),
+  // const fullLeftAxisPeakValue = Math.max(
+  //   1,
+  //   ...flowData.map((point) => point.purway),
+  //   ...flowData.map((point) => point.methane),
+  // );
+  const fullLeftAxisPeakValue = (Array.isArray(flowData) ? flowData : []).reduce(
+    (max, point) =>
+      Math.max(max, Number(point?.purway) || 0, Number(point?.methane) || 0),
+    0,
   );
   const safeSelection = useMemo(
     () => clampSelection(selection, dataLength, fullLeftAxisPeakValue),
@@ -124,11 +129,16 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   );
   const leftAxisData = resultsPageMode ? windowedData : flowData;
   const rightAxisData = resultsPageMode ? windowedData : flowData;
-  const leftAxisPeakValue = Math.max(
-    1,
-    safeSelection.ppmMax ?? 0,
-    ...leftAxisData.map((point) => point.purway),
-    ...leftAxisData.map((point) => point.methane),
+  // const leftAxisPeakValue = Math.max(
+  //   1,
+  //   safeSelection.ppmMax ?? 0,
+  //   ...leftAxisData.map((point) => point.purway),
+  //   ...leftAxisData.map((point) => point.methane),
+  // );
+  const leftAxisPeakValue = (Array.isArray(leftAxisData) ? leftAxisData : []).reduce(
+    (max, point) =>
+      Math.max(max, Number(point?.purway) || 0, Number(point?.methane) || 0),
+    0,
   );
   const rightAxisPeakValue = Math.max(
     1,

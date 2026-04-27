@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/set-state-in-effect */
 import React, { useEffect, useState } from "react";
 import { color } from "../constants/tailwind";
 import { backendHttpUrl } from "../services/api";

@@ -782,6 +782,33 @@ export function ResultsPage({
     [selectedFlowData],
   );
 
+  // DEBUG: Log selectedFlowData structure to diagnose stack overflow
+  if (typeof window !== 'undefined') {
+    try {
+      // Log type and length
+      console.log('selectedFlowData type:', typeof selectedFlowData);
+      if (Array.isArray(selectedFlowData)) {
+        console.log('selectedFlowData.length:', selectedFlowData.length);
+        // Log first 3 elements, safely
+        for (let i = 0; i < Math.min(3, selectedFlowData.length); i++) {
+          const point = selectedFlowData[i];
+          try {
+            console.log(`selectedFlowData[${i}]:`, JSON.stringify(point, (k, v) => (typeof v === 'object' && v !== null ? (v === selectedFlowData ? '[Circular]' : v) : v)));
+          } catch (e) {
+            console.log(`selectedFlowData[${i}]: [Unserializable]`, e);
+          }
+        }
+        // Check for self-reference
+        if (selectedFlowData.includes(selectedFlowData)) {
+          console.error('selectedFlowData contains itself!');
+        }
+      } else {
+        console.error('selectedFlowData is not an array:', selectedFlowData);
+      }
+    } catch (e) {
+      console.error('Error inspecting selectedFlowData:', e);
+    }
+  }
   const maxSelectablePpm = Math.max(1, getTelemetryPeakValue(selectedFlowData));
   const [selectedWindow, setSelectedWindow] = useState({
     startIndex: 0,
@@ -1845,57 +1872,44 @@ export function ResultsPage({
                 <div
                   key={mission.id}
                   className="relative w-full overflow-hidden rounded-md"
-                  style={{
-                    backgroundColor: color.surface,
-                  }}
+                  style={{ backgroundColor: color.surface }}
                 >
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => {
                       setSelectedMissionId(mission.id);
                       setSelectedResultDroneId(ALL_DRONES_OPTION);
-                      onSelectDevice?.(
-                        mission.primaryDroneId || selectedDeviceId,
-                      );
+                      onSelectDevice?.(mission.primaryDroneId || selectedDeviceId);
                     }}
-                    className="relative z-10 flex w-full flex-row rounded-md border px-3 py-2 text-left"
+                    onKeyPress={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        setSelectedMissionId(mission.id);
+                        setSelectedResultDroneId(ALL_DRONES_OPTION);
+                        onSelectDevice?.(mission.primaryDroneId || selectedDeviceId);
+                      }
+                    }}
+                    className="relative z-10 flex w-full flex-row rounded-md border px-3 py-2 text-left cursor-pointer"
                     style={{
                       borderColor: isActive ? color.orange : color.border,
-                      backgroundColor: isActive
-                        ? color.orangeSoft
-                        : color.surface,
+                      backgroundColor: isActive ? color.orangeSoft : color.surface,
                     }}
                   >
                     <div>
                       <div className="flex items-center justify-between">
-                        <p
-                          className="text-sm font-semibold"
-                          style={{ color: color.text }}
-                        >
+                        <p className="text-sm font-semibold" style={{ color: color.text }}>
                           {mission.name}
                         </p>
-                        <span
-                          className="text-[11px]"
-                          style={{
-                            color: isActive ? color.orange : color.textDim,
-                          }}
-                        >
+                        <span className="text-[11px]" style={{ color: isActive ? color.orange : color.textDim }}>
                           {mission.status}
                         </span>
                       </div>
-                      <p
-                        className="mt-1 text-xs"
-                        style={{ color: color.textMuted }}
-                      >
-                        {mission.sampleCount} samples across{" "}
-                        {mission.droneIds.length} drone(s)
+                      <p className="mt-1 text-xs" style={{ color: color.textMuted }}>
+                        {mission.sampleCount} samples across {mission.droneIds.length} drone(s)
                       </p>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {mission.droneIds.map((droneId) => {
-                          const presentation = sensorModePresentation(
-                            mission.droneSensorModeById?.[droneId],
-                          );
-
+                          const presentation = sensorModePresentation(mission.droneSensorModeById?.[droneId]);
                           return (
                             <span
                               key={`${mission.id}-${droneId}`}
@@ -1910,37 +1924,29 @@ export function ResultsPage({
                           );
                         })}
                       </div>
-                      <p
-                        className="mt-1 text-[11px]"
-                        style={{ color: color.textDim }}
-                      >
+                      <p className="mt-1 text-[11px]" style={{ color: color.textDim }}>
                         {formatTimestamp(mission.endTs)}
                       </p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onContinueMission?.(mission);
-                          }}
-                          disabled={measurementStatus !== "idle" && !isContinuing}
-                          className="rounded-md px-2.5 py-1 text-[11px] font-semibold"
-                          style={{
-                            backgroundColor: isContinuing
-                              ? color.greenSoft
-                              : color.orangeSoft,
-                            color: isContinuing ? color.green : color.orange,
-                            opacity:
-                              measurementStatus !== "idle" && !isContinuing
-                                ? 0.55
-                                : 1,
-                          }}
-                        >
-                          {isContinuing ? "Continuing" : "Continue"}
-                        </button>
-                      </div>
                     </div>
-                  </button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 px-3 pb-2">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onContinueMission?.(mission);
+                      }}
+                      disabled={measurementStatus !== "idle" && !isContinuing}
+                      className="rounded-md px-2.5 py-1 text-[11px] font-semibold"
+                      style={{
+                        backgroundColor: isContinuing ? color.greenSoft : color.orangeSoft,
+                        color: isContinuing ? color.green : color.orange,
+                        opacity: measurementStatus !== "idle" && !isContinuing ? 0.55 : 1,
+                      }}
+                    >
+                      {isContinuing ? "Continuing" : "Continue"}
+                    </button>
+                  </div>
                   <button
                     type="button"
                     onClick={() => {
@@ -1951,12 +1957,9 @@ export function ResultsPage({
                     style={{
                       backgroundColor: mission.isSynthetic ? color.surface : color.red,
                       color: mission.isSynthetic ? color.textDim : "#ffffff",
-                      transform: isDeleteMode
-                        ? "translateX(0)"
-                        : "translateX(100%)",
+                      transform: isDeleteMode ? "translateX(0)" : "translateX(100%)",
                       opacity: isDeleteMode ? 1 : 0,
-                      pointerEvents:
-                        isDeleteMode && !mission.isSynthetic ? "auto" : "none",
+                      pointerEvents: isDeleteMode && !mission.isSynthetic ? "auto" : "none",
                     }}
                     aria-label={
                       mission.isSynthetic

@@ -159,6 +159,11 @@ const normalizeSensorMode = (value) => {
 };
 
 export const extractTelemetryMetrics = (source) => {
+  // Defensive: Only process plain objects, not arrays or null/undefined
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return {};
+  }
+
   const payload = source?.payload && typeof source.payload === "object"
     ? source.payload
     : {};
@@ -267,17 +272,33 @@ export const inferFlowSensorMode = (flowData) => {
 export const isAerisFlow = (flowData) =>
   inferFlowSensorMode(flowData) === SENSOR_MODE_AERIS;
 
-export const getTelemetryPeakValue = (flowData) =>
-  Math.max(
-    1,
-    ...(Array.isArray(flowData) ? flowData : []).flatMap((point) => {
-      const metrics = extractTelemetryMetrics(point);
+export const getTelemetryPeakValue = (flowData) => {
+  const visited = new WeakSet();
+  const safeFlatMap = (arr) =>
+    arr.flatMap((point) => {
+      if (!point || typeof point !== 'object') return [0];
+      if (visited.has(point)) return [0];
+      visited.add(point);
+      let metrics = {};
+      try {
+        metrics = extractTelemetryMetrics(point) || {};
+      } catch {
+        return [0];
+      }
       return [
-        metrics.methane,
-        metrics.sniffer,
-        metrics.purway,
-        metrics.acetylene,
-        metrics.nitrousOxide,
-      ].map((value) => Number(value || 0));
-    }),
+        Number(metrics.methane) || 0,
+        Number(metrics.sniffer) || 0,
+        Number(metrics.purway) || 0,
+        Number(metrics.acetylene) || 0,
+        Number(metrics.nitrousOxide) || 0,
+      ];
+    });
+  // return Math.max(
+  //   1,
+  //   ...(Array.isArray(flowData) ? safeFlatMap(flowData) : [])
+  // );
+  return (Array.isArray(flowData) ? safeFlatMap(flowData) : []).reduce(
+    (max, value) => Math.max(max, value),
+    0,
   );
+};

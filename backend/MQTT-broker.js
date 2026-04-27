@@ -622,7 +622,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "500mb" }));
 
 const initializeDatabase = async () => {
   await sql.unsafe(`
@@ -1929,7 +1929,6 @@ client.on("message", async (receivedTopic, message) => {
         });
       }
     } else if (Array.isArray(rawPayload)) {
-      // Handle receiving a single array as the payload
       // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z]
       console.log("Received array payload, mapping to telemetry fields:", rawPayload);
       const [
@@ -2515,7 +2514,8 @@ app.get("/api/drones/latest", async (_req, res) => {
 app.get("/api/telemetry/history", async (req, res) => {
   const fromDate = parseQueryDate(req.query.from);
   const toDate = parseQueryDate(req.query.to);
-  const limit = Math.min(Number(req.query.limit) || 10000, 50000);
+  const limit = Math.min(Number(req.query.limit) || 1000, 10000); // Default 1000, max 10000
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
 
   if ((req.query.from && !fromDate) || (req.query.to && !toDate)) {
     return res.status(400).json({
@@ -2541,21 +2541,29 @@ app.get("/api/telemetry/history", async (req, res) => {
       filters.push(`ts <= $${params.length}`);
     }
 
-    params.push(limit);
-
     const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    params.push(limit);
+    params.push(offset);
     const result = await sql.unsafe(
       `
             SELECT drone_id, topic, ts, latitude, longitude, altitude, target_latitude, target_longitude, methane, sniffer, purway, distance, payload
             FROM ${TELEMETRY_TABLE}
             ${whereClause}
             ORDER BY ts DESC
-            LIMIT $${params.length}
+            LIMIT $${params.length - 1} OFFSET $${params.length}
             `,
       params,
     );
 
-    res.json({ data: result.map(hydrateTelemetryRow) });
+    res.json({
+      data: result.map(hydrateTelemetryRow),
+      pagination: {
+        limit,
+        offset,
+        count: result.length,
+        // Optionally, you could add totalCount with a separate COUNT(*) query if needed
+      },
+    });
   } catch (error) {
     console.error("Telemetry history endpoint error:", error.message);
     res.status(500).json({ error: "Failed to fetch telemetry history" });
