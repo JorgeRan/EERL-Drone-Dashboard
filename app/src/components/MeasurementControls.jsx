@@ -74,13 +74,14 @@ export function MeasurementControls({
           </span>
         </div>
       </div>
+      
       <div >
         {status === "idle" ? (
           <button
             type="button"
             onClick={onStart}
             disabled={isBusy}
-            className="w-full rounded-md px-3 py-2 text-sm font-semibold transition-colors"
+            className="w-full rounded-md px-3 py-2 text-sm font-semibold text-nowrap transition-colors"
             style={{
               backgroundColor: color.orange,
               color: color.surface,

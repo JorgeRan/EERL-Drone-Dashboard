@@ -21,6 +21,7 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "recharts": "^3.8.0",
+    "serialport": "^13.0.0",
     "tailwind": "^4.0.0",
     "tailwindcss": "^4.2.1",
     "three": "^0.183.2"

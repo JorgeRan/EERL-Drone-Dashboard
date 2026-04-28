@@ -42,6 +42,10 @@ import {
   updateMission,
   waitForBackendReady,
 } from "./services/api";
+import SignalStatus from "./components/SignalStatus";
+import { sampleSignalHistory, sampleSeqHistory } from "./components/signalStatusTestData";
+import { Signal } from "lucide-react";
+import { COMPort } from "./components/COMPort";
 
 const sensorsMode = [
   { id: "dual", name: "Dual CH4" },
@@ -66,6 +70,12 @@ const devices = [
     name: "M400-2",
     type: "Drone",
     status: "warning",
+  },
+  {
+    id: "Aeris",
+    name: "Aeris Sensor",
+    type: "Sensor",
+    status: "online",
   },
 ];
 
@@ -273,7 +283,6 @@ const appendFlowPoint = (series, telemetryRow) => {
 
   return [...existingSeries, nextPoint]
     .sort((a, b) => a.timestampMs - b.timestampMs)
-    .slice(-1000)
     .map((point, index) => ({
       ...point,
       sampleOrder: index,
@@ -954,15 +963,15 @@ function App() {
 
     const missionPayload = continuingMission
       ? {
-          results: missionResults,
-        }
+        results: missionResults,
+      }
       : {
-          id: `mission-${Date.now()}`,
-          name: missionName.trim() || `Mission ${new Date().toLocaleString()}`,
-          createdAt: new Date().toISOString(),
-          elapsedSeconds: measurementElapsedSeconds,
-          results: missionResults,
-        };
+        id: `mission-${Date.now()}`,
+        name: missionName.trim() || `Mission ${new Date().toLocaleString()}`,
+        createdAt: new Date().toISOString(),
+        elapsedSeconds: measurementElapsedSeconds,
+        results: missionResults,
+      };
 
     const savedMission = continuingMission
       ? await updateMission(continuingMission.id, missionPayload)
@@ -1191,102 +1200,136 @@ function App() {
             onRefresh={reloadAllHistory}
           />
         ) : null}
-        <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
+        {/* <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
           <div className="pointer-events-auto rounded-xl bg-white/90 shadow-md backdrop-blur-sm">
             <Messages ref={msgs} />
           </div>
-        </div>
+        </div> */}
 
         <section
           className={tw.shell}
           style={{ display: currentView === "dashboard" ? undefined : "none" }}
         >
           <div className="grid w-full gap-3 lg:grid-cols-[96px_minmax(0,1fr)]">
-            <div className="flex h-fit flex-col gap-3">
-              <DeviceTabs
-                devices={devices}
-                activeDeviceId={selectedDeviceId}
-                onSelectDevice={setSelectedDeviceId}
-                latestPointByDrone={latestPointByDrone}
-              />
+            <div>
+              <div className="flex h-fit flex-col gap-3 mb-3">
+                <DeviceTabs
+                  devices={devices}
+                  activeDeviceId={selectedDeviceId}
+                  onSelectDevice={setSelectedDeviceId}
+                  latestPointByDrone={latestPointByDrone}
+                />
+              </div>
+              
             </div>
-
             <div className="grid w-full gap-3">
-              <div className="flex h-full w-full flex-row justify-between  items-center gap-3">
-                <div
-                  className="flex-2 rounded-lg border px-4 py-3 h-full w-full"
-                  style={{
-                    backgroundColor: color.card,
-                    borderColor: color.border,
-                  }}
-                >
-                  <div className="flex flex-wrap items-center h-full justify-between gap-3">
-                    <div>
-                      <p
-                        className="text-[11px] uppercase tracking-[0.16em]"
-                        style={{ color: color.green }}
-                      >
-                        Active Drone
-                      </p>
-                      <p
-                        className="text-xl font-bold tracking-tight"
-                        style={{ color: color.text }}
-                      >
-                        {activeDevice.name}
-                      </p>
-                    </div>
+              <div className="flex flex-row gap-3">
+                <div className="flex h-full w-full flex-row justify-between  items-center gap-3">
+                  <div
+                    className="flex-2 rounded-lg border px-4 py-3 h-full w-full"
+                    style={{
+                      backgroundColor: color.card,
+                      borderColor: color.border,
+                    }}
+                  >
+                    <div className="flex flex-wrap items-center h-full justify-between gap-3">
+                      <div>
+                        <p
+                          className="text-[11px] uppercase tracking-[0.16em]"
+                          style={{ color: color.green }}
+                        >
+                          Active Drone
+                        </p>
+                        <p
+                          className="text-xl font-bold tracking-tight"
+                          style={{ color: color.text }}
+                        >
+                          {activeDevice.name}
+                        </p>
+                      </div>
 
-                    <div className="flex flex-wrap items-center gap-2 text-xs">
-                      <div className="flex items-center gap-2 mr-4">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <div className="flex items-center gap-2 mr-4">
+                          <span
+                            className="rounded-full px-3 py-1"
+                            style={{
+                              backgroundColor:
+                                activeSensorMode === SENSOR_MODE_AERIS
+                                  ? color.greenSoft
+                                  : color.surface,
+                              color:
+                                activeSensorMode === SENSOR_MODE_AERIS
+                                  ? color.green
+                                  : color.textMuted,
+                            }}
+                          >
+                            {activeSensorMode === SENSOR_MODE_AERIS
+                              ? "Aeris Detected"
+                              : "Dual Sensor Detected"}
+                          </span>
+                        </div>
                         <span
                           className="rounded-full px-3 py-1"
                           style={{
-                            backgroundColor:
-                              activeSensorMode === SENSOR_MODE_AERIS
-                                ? color.greenSoft
-                                : color.surface,
-                            color:
-                              activeSensorMode === SENSOR_MODE_AERIS
-                                ? color.green
-                                : color.textMuted,
+                            backgroundColor: color.surface,
+                            color: color.textMuted,
                           }}
                         >
-                          {activeSensorMode === SENSOR_MODE_AERIS
-                            ? "Aeris Detected"
-                            : "Dual Sensor Detected"}
+                          Type {activeDevice.type}
+                        </span>
+                        <span
+                          className="rounded-full px-3 py-1"
+                          style={{
+                            backgroundColor: color.orangeSoft,
+                            color: color.orange,
+                          }}
+                        >
+                          CH4 {Number(activePoint?.methane ?? 0).toFixed(2)} ppm
+                        </span>
+                        <span
+                          className="rounded-full px-3 py-1"
+                          style={{
+                            backgroundColor: color.greenSoft,
+                            color: color.green,
+                          }}
+                        >
+                          Alt {Number(activePoint?.altitude ?? 0).toFixed(1)} m
                         </span>
                       </div>
-                      <span
-                        className="rounded-full px-3 py-1"
-                        style={{
-                          backgroundColor: color.surface,
-                          color: color.textMuted,
-                        }}
-                      >
-                        Type {activeDevice.type}
-                      </span>
-                      <span
-                        className="rounded-full px-3 py-1"
-                        style={{
-                          backgroundColor: color.orangeSoft,
-                          color: color.orange,
-                        }}
-                      >
-                        CH4 {Number(activePoint?.methane ?? 0).toFixed(2)} ppm
-                      </span>
-                      <span
-                        className="rounded-full px-3 py-1"
-                        style={{
-                          backgroundColor: color.greenSoft,
-                          color: color.green,
-                        }}
-                      >
-                        Alt {Number(activePoint?.altitude ?? 0).toFixed(1)} m
-                      </span>
                     </div>
                   </div>
+                  <COMPort />
+                  <div
+                    className="flex flex-row h-full items-center rounded-lg border p-3 gap-4"
+                    style={{
+                      backgroundColor: color.card,
+                      borderColor: color.border,
+                    }}
+                  >
+                    {/* <SignalStatus
+                      signalHistory={
+                        (liveTelemetryByDrone[selectedDeviceId] || []).map((pt) => ({
+                          q0: pt.payload?.q0,
+                          q1: pt.payload?.q1,
+                        }))
+                      }
+                      seqHistory={
+                        (liveTelemetryByDrone[selectedDeviceId] || []).map((pt) => {
+                          return pt.payload?.seq ?? pt.seq;
+                        }).filter((v) => v !== undefined && v !== null)
+                      }
+                      color={color}
+                    /> */}
+                    
+                    <SignalStatus
+                      signalHistory={sampleSignalHistory}
+                      seqHistory={sampleSeqHistory}
+                      color={color}
+                    />
+                  </div>
                 </div>
-                <MeasurementControls
+                
+                {/* <MeasurementControls
                   status={measurementStatus}
                   elapsedSeconds={measurementElapsedSeconds}
                   isBusy={measurementBusy}
@@ -1294,7 +1337,8 @@ function App() {
                   onPause={handlePauseMeasurement}
                   onResume={handleResumeMeasurement}
                   onStop={() => setIsMissionModalOpen(true)}
-                />
+                /> */}
+
               </div>
 
               <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]">
@@ -1329,7 +1373,7 @@ function App() {
                   ]}
                 />
               </div>
-              {activeSensorMode === SENSOR_MODE_AERIS ? (
+              {selectedDeviceId === "Aeris" ? (
                 <AerisPanel
                   flowData={liveFlowData}
                   selection={selectedWindow}

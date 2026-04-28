@@ -1,3 +1,4 @@
+import { ReadlineParser } from "serialport";
 import mqtt from "mqtt";
 import express from "express";
 import dotenv from "dotenv";
@@ -9,6 +10,7 @@ import dns from "node:dns/promises";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SerialPort } from "serialport";
 import { WebSocketServer } from "ws";
 import sql from "./db.js";
 import { createRemoteMissionStore } from "./remoteMissionStore.js";
@@ -199,6 +201,94 @@ const updateMeasurementConfig = ({ excludedDroneIds } = {}) => {
   measurementState.excludedDroneIds = toExcludedDroneIdSet(excludedDroneIds);
   return measurementStatusPayload();
 };
+
+
+let serialPortHandleLive = null;
+let serialPortNameLive = "COM13";
+let serialBaudRateLive = 9600;
+
+function startSerialTelemetryLive(portName = serialPortNameLive, baudRate = serialBaudRateLive) {
+  if (serialPortHandleLive) {
+    try { serialPortHandleLive.close(); } catch { }
+    serialPortHandleLive = null;
+  }
+  serialPortHandleLive = new SerialPort({ path: portName, baudRate, autoOpen: true });
+  const parser = serialPortHandleLive.pipe(new ReadlineParser({ delimiter: "\n" }));
+
+  parser.on("data", (line) => {
+    const parsed = parseAerisLine(line);
+    if (parsed) {
+      wss.clients.forEach((client) => {
+        if (client.readyState === 1) {
+          client.send(JSON.stringify({ type: "telemetry", data: parsed }));
+        }
+      });
+    }
+  });
+
+  serialPortHandleLive.on("error", (err) => {
+    console.error("Serial port error:", err);
+  });
+}
+
+function parseAerisLine(line) {
+  line = line.replace(/^[\\[#]+TXT:?|\\]+$/g, '').trim();
+  const parts = [];
+  let buffer = '';
+  let inBraces = 0;
+  for (const char of line) {
+    if (char === '{') inBraces++;
+    if (char === '}') inBraces--;
+    if (char === ':' && inBraces === 0) {
+      parts.push(buffer);
+      buffer = '';
+    } else {
+      buffer += char;
+    }
+  }
+  if (buffer) parts.push(buffer);
+
+  const result = {};
+  for (const part of parts) {
+    if (part.includes('{') && part.includes('}')) {
+      const [prefix, jsonStr] = part.split('{');
+      try {
+        const obj = JSON.parse('{' + jsonStr.replace(/([a-zA-Z0-9_]+):/g, '"$1":').replace(/,}/g, '}'));
+        Object.assign(result, obj);
+      } catch { }
+    } else {
+      for (const kv of part.split(',')) {
+        const [k, v] = kv.split('=');
+        if (k && v) result[k.trim()] = v.trim();
+      }
+    }
+  }
+
+  if (result.pr1 || result.pr2) return null;
+  ["ch4", "c2h2_ppb", "n2o", "humVPpm", "co2", "aerisPressure", "aerisTGas"].forEach((k) => {
+    if (result[k]) result[k] = parseFloat(result[k]);
+  });
+  if (result.q0) result.q0 = parseInt(result.q0, 16);
+  if (result.q1) result.q1 = parseInt(result.q1, 16);
+  if (result.seq) result.seq = parseInt(result.seq, 10);
+  // Ensure drone_id is always present for Aeris data
+  if (!result.drone_id) result.drone_id = result.id || "Aeris";
+  return result;
+}
+
+app.use(express.json());
+app.post("/api/serial-port", (req, res) => {
+  const { port, baudRate } = req.body || {};
+  if (!port) return res.status(400).json({ error: "Missing port" });
+  serialPortNameLive = port;
+  if (baudRate) serialBaudRateLive = baudRate;
+  startSerialTelemetryLive(serialPortNameLive, serialBaudRateLive);
+  res.json({ ok: true, port: serialPortNameLive, baudRate: serialBaudRateLive });
+});
+
+if (serialPortNameLive) {
+  startSerialTelemetryLive(serialPortNameLive, serialBaudRateLive);
+}
 
 const runCommand = ({ command, args, cwd, timeoutMs }) =>
   new Promise((resolve, reject) => {
@@ -443,22 +533,22 @@ const runAerisNotebook = async (inputPayload = null) => {
   const workspaceVenvDir = path.join(__dirname, "..", ".venv");
   const bundledPythonCandidates = process.platform === "win32"
     ? [
-        path.join(bundledVenvDir, "Scripts", "python.exe"),
-        path.join(bundledVenvDir, "Scripts", "python3.exe"),
-      ]
+      path.join(bundledVenvDir, "Scripts", "python.exe"),
+      path.join(bundledVenvDir, "Scripts", "python3.exe"),
+    ]
     : [
-        path.join(bundledVenvDir, "bin", "python3"),
-        path.join(bundledVenvDir, "bin", "python"),
-      ];
+      path.join(bundledVenvDir, "bin", "python3"),
+      path.join(bundledVenvDir, "bin", "python"),
+    ];
   const workspacePythonCandidates = process.platform === "win32"
     ? [
-        path.join(workspaceVenvDir, "Scripts", "python.exe"),
-        path.join(workspaceVenvDir, "Scripts", "python3.exe"),
-      ]
+      path.join(workspaceVenvDir, "Scripts", "python.exe"),
+      path.join(workspaceVenvDir, "Scripts", "python3.exe"),
+    ]
     : [
-        path.join(workspaceVenvDir, "bin", "python3"),
-        path.join(workspaceVenvDir, "bin", "python"),
-      ];
+      path.join(workspaceVenvDir, "bin", "python3"),
+      path.join(workspaceVenvDir, "bin", "python"),
+    ];
   const pythonCandidates = [
     ...bundledPythonCandidates.filter((candidate) => existsSync(candidate)),
     ...workspacePythonCandidates.filter((candidate) => existsSync(candidate)),
@@ -901,8 +991,8 @@ const haversineDistanceMeters = (from, to) => {
   const a =
     Math.sin(latitudeDelta / 2) ** 2 +
     Math.cos(fromLatitudeRadians) *
-      Math.cos(toLatitudeRadians) *
-      Math.sin(longitudeDelta / 2) ** 2;
+    Math.cos(toLatitudeRadians) *
+    Math.sin(longitudeDelta / 2) ** 2;
 
   return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
@@ -911,13 +1001,13 @@ const resolveTelemetryMapCoordinates = (telemetry) => {
   const useTargetCoordinates = telemetry.payload?.map_coordinates === "target";
   const latitude = useTargetCoordinates
     ? telemetry.target_latitude ??
-      telemetry.payload?.target_latitude ??
-      telemetry.latitude
+    telemetry.payload?.target_latitude ??
+    telemetry.latitude
     : telemetry.latitude;
   const longitude = useTargetCoordinates
     ? telemetry.target_longitude ??
-      telemetry.payload?.target_longitude ??
-      telemetry.longitude
+    telemetry.payload?.target_longitude ??
+    telemetry.longitude
     : telemetry.longitude;
 
   if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
@@ -1106,7 +1196,7 @@ const normalizeTelemetry = (topic, rawPayload) => {
     typeof rawPayload.sensorMode === "string" && rawPayload.sensorMode.trim()
       ? rawPayload.sensorMode.trim().toLowerCase()
       : typeof rawPayload.sensor_type === "string" &&
-          rawPayload.sensor_type.trim()
+        rawPayload.sensor_type.trim()
         ? rawPayload.sensor_type.trim().toLowerCase()
         : acetylene !== null || nitrousOxide !== null || ethylene !== null
           ? "aeris"
@@ -2285,9 +2375,9 @@ app.put("/api/missions/:id", async (req, res) => {
       );
       const purway = toFiniteNumber(
         point?.purway ??
-          point?.payload?.purway_ppm_m ??
-          point?.payload?.purway_ppn ??
-          point?.payload?.purway_ppm,
+        point?.payload?.purway_ppm_m ??
+        point?.payload?.purway_ppn ??
+        point?.payload?.purway_ppm,
       );
 
       return sniffer ?? 0;
@@ -2315,9 +2405,9 @@ app.put("/api/missions/:id", async (req, res) => {
       );
       const purway = toFiniteNumber(
         point?.purway ??
-          point?.payload?.purway_ppm_m ??
-          point?.payload?.purway_ppn ??
-          point?.payload?.purway_ppm,
+        point?.payload?.purway_ppm_m ??
+        point?.payload?.purway_ppn ??
+        point?.payload?.purway_ppm,
       );
       const acetylene = toFiniteNumber(point?.acetylene ?? point?.c2h2);
       const nitrousOxide = toFiniteNumber(
@@ -2514,7 +2604,7 @@ app.get("/api/drones/latest", async (_req, res) => {
 app.get("/api/telemetry/history", async (req, res) => {
   const fromDate = parseQueryDate(req.query.from);
   const toDate = parseQueryDate(req.query.to);
-  const limit = Math.min(Number(req.query.limit) || 1000, 10000); // Default 1000, max 10000
+  const limit = Math.min(Number(req.query.limit) || 1000, 100000); // Default 1000, max 100000
   const offset = Math.max(Number(req.query.offset) || 0, 0);
 
   if ((req.query.from && !fromDate) || (req.query.to && !toDate)) {
@@ -2619,6 +2709,16 @@ app.get("/api/drones/:id/history", async (req, res) => {
   } catch (error) {
     console.error("History endpoint error:", error.message);
     res.status(500).json({ error: "Failed to fetch drone history" });
+  }
+});
+
+
+app.get("/api/com-ports", async (req, res) => {
+  try {
+    const ports = await SerialPort.list();
+    res.json(ports.map(({ path, friendlyName, manufacturer }) => ({ path, friendlyName, manufacturer })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

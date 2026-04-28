@@ -12,7 +12,7 @@ const resolveBackendPort = () => {
     if (Number.isInteger(candidatePort) && candidatePort > 0 && candidatePort <= 65535) {
       return candidatePort;
     }
-  } catch {}
+  } catch { }
 
   return DEFAULT_LOCAL_BACKEND_PORT;
 };
@@ -55,7 +55,7 @@ export async function waitForBackendReady({
       if (response.ok) {
         return true;
       }
-    } catch {}
+    } catch { }
 
     if (attempt < attempts - 1) {
       await sleep(delayMs);
@@ -180,7 +180,7 @@ export async function listMissions() {
   }
 }
 
-export async function listTelemetryHistory({ limit = 10000, from, to } = {}) {
+export async function listTelemetryHistory({ limit = 100000, from, to } = {}) {
   try {
     const query = new URLSearchParams();
     if (Number.isFinite(limit) && limit > 0) {
@@ -296,15 +296,15 @@ export async function runAerisAnalysis(payload) {
       outputText: String(responsePayload?.outputText || ""),
       imageDataUri:
         typeof responsePayload?.imageDataUri === "string" &&
-        responsePayload.imageDataUri
+          responsePayload.imageDataUri
           ? responsePayload.imageDataUri
           : null,
       imageDataUris: Array.isArray(responsePayload?.imageDataUris)
         ? responsePayload.imageDataUris.filter(
-            (value) => typeof value === "string" && value,
-          )
+          (value) => typeof value === "string" && value,
+        )
         : typeof responsePayload?.imageDataUri === "string" &&
-            responsePayload.imageDataUri
+          responsePayload.imageDataUri
           ? [responsePayload.imageDataUri]
           : [],
       executionCount: responsePayload?.executionCount ?? null,
@@ -368,5 +368,20 @@ export async function pythonDataSender() {
     const errorMessage = `[test] Request failed: ${error.message}`;
     console.error(errorMessage);
     return { ok: false, error: errorMessage };
+  }
+}
+
+
+
+// List available COM ports from backend
+export async function getCOMPorts() {
+  try {
+    const response = await fetch(`${backendHttpUrl}/api/com-ports`, { cache: "no-store" });
+    if (!response.ok) return [];
+    const ports = await response.json();
+    // Return array of { path, friendlyName, manufacturer }
+    return ports;
+  } catch {
+    return [];
   }
 }

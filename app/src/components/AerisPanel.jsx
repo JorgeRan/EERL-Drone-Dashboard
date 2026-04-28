@@ -147,12 +147,16 @@ export function AerisPanel({
   const hasNitrousOxideTracer = tracerAvailability?.nitrousOxide ?? true;
   const dataLength = flowData.length;
   const maxIndex = Math.max(dataLength - 1, 0);
-  const fullPeakValue = Math.max(
-    1,
-    ...flowData.map((point) => point.methane),
-    ...flowData.map((point) => point.acetylene),
-    ...flowData.map((point) => point.nitrousOxide),
-  );
+  // Robustly compute the peak value across all series, fallback to 1 if empty
+  const allValues = [
+    ...flowData.map((point) => Number(point?.methane ?? 0)),
+    ...flowData.map((point) => Number(point?.acetylene ?? 0)),
+    ...flowData.map((point) => Number(point?.nitrousOxide ?? 0)),
+  ].filter((v) => Number.isFinite(v));
+  const fullPeakValue = allValues.length
+    ? Math.max(1, allValues.reduce((max, v) => Math.max(max, v), -Infinity))
+    : 1;
+  
   const safeSelection = useMemo(
     () => clampSelection(selection, dataLength, fullPeakValue),
     [selection, dataLength, fullPeakValue],

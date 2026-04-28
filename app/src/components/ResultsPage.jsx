@@ -630,7 +630,7 @@ export function ResultsPage({
   const loadTelemetryHistory = useCallback(async (range = {}) => {
     setIsTelemetryHistoryLoading(true);
     const loadedTelemetryHistory = await listTelemetryHistory({
-      limit: 10000,
+      limit: 100000,
       from: range.from || undefined,
       to: range.to || undefined,
     });
@@ -1722,7 +1722,7 @@ export function ResultsPage({
                   className="text-[11px]"
                   style={{ color: color.textMuted }}
                 >
-                  {isTelemetryHistoryLoading ? "Loading..." : "Latest 10,000 rows max"}
+                  {isTelemetryHistoryLoading ? "Loading..." : "Latest 100,000 rows max"}
                 </span>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
