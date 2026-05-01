@@ -677,6 +677,48 @@ function parseCsvToMissionResults(text, options) {
   return filterMissionResultsOutliers(standardResults);
 }
 
+const parseCsvToMissionResultsInWorker = ({ text, options }) =>
+  new Promise((resolve, reject) => {
+    if (typeof Worker === "undefined") {
+      reject(new Error("Web Worker is not available"));
+      return;
+    }
+
+    const worker = new Worker(
+      new URL("../workers/csvParserWorker.js", import.meta.url),
+      { type: "module" },
+    );
+    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    const cleanup = () => {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+    };
+
+    worker.onmessage = (event) => {
+      const payload = event.data || {};
+      if (payload.requestId !== requestId) {
+        return;
+      }
+
+      cleanup();
+      if (!payload.ok) {
+        reject(new Error(payload.error || "CSV parsing worker failed"));
+        return;
+      }
+
+      resolve(payload.result);
+    };
+
+    worker.onerror = () => {
+      cleanup();
+      reject(new Error("CSV parsing worker crashed"));
+    };
+
+    worker.postMessage({ requestId, text, options });
+  });
+
 export function CSVImportModal({
   file,
   onClose,
@@ -749,11 +791,23 @@ export function CSVImportModal({
         selectedDroneId.trim() ||
         file.name.replace(/\.csv$/i, "").trim() ||
         "csv-import";
-      const { missionResults: results, droppedCount } = parseCsvToMissionResults(fileText, {
+      const parserOptions = {
         fallbackDroneId,
         defaultSensorMode: selectedSensorId || SENSOR_MODE_DUAL,
         fileLastModified: file.lastModified,
-      });
+      };
+
+      let parsedResult;
+      try {
+        parsedResult = await parseCsvToMissionResultsInWorker({
+          text: fileText,
+          options: parserOptions,
+        });
+      } catch {
+        parsedResult = parseCsvToMissionResults(fileText, parserOptions);
+      }
+
+      const { missionResults: results, droppedCount } = parsedResult;
 
       if (!results) {
         setStatus({

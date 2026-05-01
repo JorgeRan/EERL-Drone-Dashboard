@@ -84,6 +84,82 @@ const fallbackMaxSelectablePpm = Math.max(
   ...flowChartData.map((point) => getTelemetryPeakValue([point])),
 );
 
+const REQUIRED_FLIGHT_STATUS = 2;
+
+const getTelemetryFlightStatus = (source) =>
+  toFiniteNumber(
+    source?.flight_status ??
+      source?.flightStatus ??
+      source?.payload?.flight_status ??
+      source?.payload?.flightStatus,
+  );
+
+const shouldDisplayTelemetry = (source) => {
+  const flightStatus = getTelemetryFlightStatus(source);
+
+  // Keep telemetry visible when flight_status is missing (e.g. simulator payloads).
+  if (flightStatus === null) {
+    return true;
+  }
+
+  return flightStatus === REQUIRED_FLIGHT_STATUS;
+};
+
+const METHANE_VALID_VALID = 1;
+const METHANE_VALID_INVALID = 2;
+
+const resolveRawMethaneValidity = (source) => {
+  const candidates = [
+    source?.methane_valid,
+    source?.methaneValid,
+    source?.payload?.methane_valid,
+    source?.payload?.methaneValid,
+  ];
+
+  return candidates.find(
+    (candidate) => candidate !== undefined && candidate !== null,
+  );
+};
+
+const getTelemetryMethaneValidity = (source) => {
+  const rawMethaneValidity = resolveRawMethaneValidity(source);
+
+  if (rawMethaneValidity === undefined || rawMethaneValidity === null) {
+    return null;
+  }
+
+  const methaneValidity = toFiniteNumber(rawMethaneValidity);
+
+  if (
+    methaneValidity === METHANE_VALID_VALID ||
+    methaneValidity === METHANE_VALID_INVALID
+  ) {
+    return methaneValidity;
+  }
+
+  return 0;
+};
+
+const shouldIncludeMethaneValidity = (source, visibility) => {
+  const methaneValidity = getTelemetryMethaneValidity(source);
+
+  // Keep points that do not carry methane_valid metadata.
+  if (methaneValidity === null) {
+    return true;
+  }
+
+  if (methaneValidity === METHANE_VALID_VALID) {
+    return visibility.valid;
+  }
+
+  if (methaneValidity === METHANE_VALID_INVALID) {
+    return visibility.invalid;
+  }
+
+  // methane_valid=0 is explicit invalid/unknown quality from source data.
+  return false;
+};
+
 const getTelemetryCoordinate = (source, axis) => {
   if (axis === "latitude") {
     return (
@@ -186,7 +262,7 @@ const buildFlowDataFromHistory = (historyRows) => {
     (a, b) => new Date(a.ts || 0).getTime() - new Date(b.ts || 0).getTime(),
   );
 
-  return sortedRows.map((row, index) => {
+  return sortedRows.filter(shouldDisplayTelemetry).map((row, index) => {
     const payload = row.payload || {};
     const metrics = extractTelemetryMetrics({
       ...row,
@@ -214,6 +290,7 @@ const buildFlowDataFromHistory = (historyRows) => {
       wind_v: getTelemetryWindComponent(payload, "y"),
       wind_w: getTelemetryWindComponent(payload, "z"),
       distance: row.distance ?? null,
+      methane_valid: getTelemetryMethaneValidity({ ...row, payload }),
       payload,
     };
   });
@@ -247,6 +324,7 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
     wind_v: getTelemetryWindComponent(payload, "y"),
     wind_w: getTelemetryWindComponent(payload, "z"),
     distance: telemetryRow.distance ?? null,
+    methane_valid: getTelemetryMethaneValidity({ ...telemetryRow, payload }),
     payload,
   };
 };
@@ -287,6 +365,7 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
           sensorMode: point.sensorMode,
           ch4: point.methane,
           methane: traceValue,
+          methaneValid: getTelemetryMethaneValidity(point),
           displayMetricLabel: traceDisplayMetric.label,
           displayMetricUnits: traceDisplayMetric.units,
           sourceLatitude,
@@ -303,6 +382,11 @@ const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
 
 const appendFlowPoint = (series, telemetryRow) => {
   const existingSeries = series || [];
+
+  if (!shouldDisplayTelemetry(telemetryRow)) {
+    return existingSeries;
+  }
+
   const nextPoint = buildFlowPointFromTelemetry(
     telemetryRow,
     existingSeries.length,
@@ -363,6 +447,7 @@ const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
 
 function App() {
   const [currentView, setCurrentView] = useState("dashboard");
+  const currentViewRef = useRef(currentView);
   const [selectedDeviceId, setSelectedDeviceId] = useState(devices[0].id);
   const [measurementStatus, setMeasurementStatus] = useState("idle");
   const [measurementElapsedSeconds, setMeasurementElapsedSeconds] = useState(0);
@@ -385,6 +470,10 @@ function App() {
 
   const [telemetrySource, setTelemetrySource] = useState("MQTT");
   const [showDashboardPlotData, setShowDashboardPlotData] = useState(true);
+  const [methaneValidityVisibility, setMethaneValidityVisibility] = useState({
+    valid: true,
+    invalid: true,
+  });
   const [dashboardDroneVisibility, setDashboardDroneVisibility] = useState(() =>
     devices.reduce((accumulator, device) => {
       accumulator[device.id] = true;
@@ -422,13 +511,29 @@ function App() {
     return flowChartData;
   }, [liveTelemetryByDrone, recordedFlowDataByDrone, selectedDeviceId]);
 
+  const filteredMeasurementTraceData = useMemo(
+    () =>
+      measurementTraceData.filter((point) =>
+        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+      ),
+    [measurementTraceData, methaneValidityVisibility],
+  );
+
+  const filteredLiveFlowData = useMemo(
+    () =>
+      liveFlowData.filter((point) =>
+        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+      ),
+    [liveFlowData, methaneValidityVisibility],
+  );
+
   const maxSelectablePpm = Math.max(
     fallbackMaxSelectablePpm,
-    getTelemetryPeakValue(liveFlowData),
+    getTelemetryPeakValue(filteredLiveFlowData),
   );
   const [selectedWindow, setSelectedWindow] = useState({
     startIndex: 0,
-    endIndex: liveFlowData.length - 1,
+    endIndex: filteredLiveFlowData.length - 1,
     ppmMin: 0,
     ppmMax: fallbackMaxSelectablePpm,
   });
@@ -525,6 +630,11 @@ function App() {
             if (packet?.type !== "telemetry" || !packet.data?.drone_id) {
               return;
             }
+
+            if (currentViewRef.current !== "dashboard") {
+              return;
+            }
+
             const droneId = packet.data.drone_id;
             const packetDataForSeries = packet.data;
             const source =
@@ -658,18 +768,20 @@ function App() {
   useEffect(() => {
     setSelectedWindow({
       startIndex: 0,
-      endIndex: Math.max(0, liveFlowData.length - 1),
+      endIndex: Math.max(0, filteredLiveFlowData.length - 1),
       ppmMin: 0,
       ppmMax: maxSelectablePpm,
     });
-  }, [liveFlowData, maxSelectablePpm]);
+  }, [filteredLiveFlowData, maxSelectablePpm]);
 
   const activeTraceDataset = useMemo(
     () =>
       buildTraceDatasetFromFlowData(
-        measurementTraceData.length > 0 ? measurementTraceData : liveFlowData,
+        filteredMeasurementTraceData.length > 0
+          ? filteredMeasurementTraceData
+          : filteredLiveFlowData,
       ),
-    [measurementTraceData, liveFlowData],
+    [filteredMeasurementTraceData, filteredLiveFlowData],
   );
 
   const filteredTraceDataset = useMemo(
@@ -694,24 +806,27 @@ function App() {
           liveTelemetryByDrone,
           recordedFlowDataByDrone,
           visibleDroneIds: visibleDashboardDroneIds,
-        }),
+        }).filter((point) =>
+          shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+        ),
       ),
     [
       measurementTraceByDrone,
       liveTelemetryByDrone,
       recordedFlowDataByDrone,
       visibleDashboardDroneIds,
+      methaneValidityVisibility,
     ],
   );
 
   const windSamples = useMemo(
     () =>
-      liveFlowData.map((point) => ({
+      filteredLiveFlowData.map((point) => ({
         u: point.wind_u ?? 0,
         v: point.wind_v ?? 0,
         w: point.wind_w ?? 0,
       })),
-    [liveFlowData],
+    [filteredLiveFlowData],
   );
 
   const latestPointByDrone = useMemo(() => {
@@ -720,14 +835,27 @@ function App() {
     devices.forEach((device) => {
       const liveSeries = liveTelemetryByDrone[device.id] || [];
       const recordedSeries = recordedFlowDataByDrone[device.id] || [];
-      const activeSeries = liveSeries.length > 0 ? liveSeries : recordedSeries;
+      const filteredLiveSeries = liveSeries.filter((point) =>
+        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+      );
+      const filteredRecordedSeries = recordedSeries.filter((point) =>
+        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+      );
+      const activeSeries =
+        filteredLiveSeries.length > 0
+          ? filteredLiveSeries
+          : filteredRecordedSeries;
       entries[device.id] = activeSeries.length
         ? activeSeries[activeSeries.length - 1]
         : null;
     });
 
     return entries;
-  }, [liveTelemetryByDrone, recordedFlowDataByDrone]);
+  }, [
+    liveTelemetryByDrone,
+    recordedFlowDataByDrone,
+    methaneValidityVisibility,
+  ]);
 
   const reloadHistory = useCallback(
     async (droneId) => {
@@ -793,9 +921,29 @@ function App() {
   const activeSensorMode = useMemo(() => {
     return (
       detectedSensorModeByDrone[selectedDeviceId] ||
-      inferFlowSensorMode(liveFlowData)
+      inferFlowSensorMode(filteredLiveFlowData)
     );
-  }, [detectedSensorModeByDrone, liveFlowData, selectedDeviceId]);
+  }, [detectedSensorModeByDrone, filteredLiveFlowData, selectedDeviceId]);
+
+  const handleToggleMethaneValidityVisibility = useCallback((key) => {
+    setMethaneValidityVisibility((previous) => {
+      if (key !== "valid" && key !== "invalid") {
+        return previous;
+      }
+
+      const next = {
+        ...previous,
+        [key]: !previous[key],
+      };
+
+      if (!next.valid && !next.invalid) {
+        // Keep at least one methane_valid category visible.
+        next[key] = true;
+      }
+
+      return next;
+    });
+  }, []);
   const handleToggleDashboardDroneVisibility = useCallback((droneId) => {
     setDashboardDroneVisibility((previous) => ({
       ...previous,
@@ -815,6 +963,10 @@ function App() {
   useEffect(() => {
     measurementStatusRef.current = measurementStatus;
   }, [measurementStatus]);
+
+  useEffect(() => {
+    currentViewRef.current = currentView;
+  }, [currentView]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1382,6 +1534,10 @@ function App() {
                   }
                   droneVisibilityById={dashboardDroneVisibility}
                   onToggleDroneVisibility={handleToggleDashboardDroneVisibility}
+                  methaneValidityVisibility={methaneValidityVisibility}
+                  onToggleMethaneValidity={
+                    handleToggleMethaneValidityVisibility
+                  }
                   resultsPageMode={false}
                   missionConfiguration={{
                     ...(devices.reduce((acc, d) => {
@@ -1403,7 +1559,7 @@ function App() {
               </div>
               {selectedDeviceId === "Aeris" ? (
                 <AerisPanel
-                  flowData={liveFlowData}
+                  flowData={filteredLiveFlowData}
                   selection={selectedWindow}
                   onSelectionChange={setSelectedWindow}
                   resultsPageMode={false}
@@ -1411,7 +1567,7 @@ function App() {
               ) : (
                 <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]">
                   <MethanePanel
-                    flowData={liveFlowData}
+                    flowData={filteredLiveFlowData}
                     selection={selectedWindow}
                     onSelectionChange={setSelectedWindow}
                     resultsPageMode={false}

@@ -46,6 +46,66 @@ const DEFAULT_PRESSURE_PA = 101325.0;
 const DEFAULT_TRANSECT_WIDTH_M = 80.0;
 const DEFAULT_MIXING_HEIGHT_M = 25.0;
 const DELETE_ALL_HOLD_MS = 2000;
+const METHANE_VALID_VALID = 1;
+const METHANE_VALID_INVALID = 2;
+
+const resolveRawMethaneValidity = (source) => {
+  const candidates = [
+    source?.methane_valid,
+    source?.methaneValid,
+    source?.payload?.methane_valid,
+    source?.payload?.methaneValid,
+  ];
+
+  const firstDefined = candidates.find(
+    (candidate) => candidate !== undefined && candidate !== null,
+  );
+
+  return firstDefined;
+};
+
+const getTelemetryMethaneValidity = (source) => {
+  const rawMethaneValidity = resolveRawMethaneValidity(source);
+
+  if (rawMethaneValidity === undefined || rawMethaneValidity === null) {
+    return null;
+  }
+
+  const methaneValidity = toFiniteNumber(rawMethaneValidity);
+
+  if (
+    methaneValidity === METHANE_VALID_VALID ||
+    methaneValidity === METHANE_VALID_INVALID
+  ) {
+    return methaneValidity;
+  }
+
+  return 0;
+};
+
+const shouldIncludeMethaneValidity = (source, visibility) => {
+  // Aeris traces do not use methane_valid in the same way as dual-sensor telemetry.
+  if (source?.sensorMode === SENSOR_MODE_AERIS) {
+    return true;
+  }
+
+  const methaneValidity = getTelemetryMethaneValidity(source);
+
+  // Only filter rows that actually carry methane_valid.
+  if (methaneValidity === null) {
+    return true;
+  }
+
+  if (methaneValidity === METHANE_VALID_VALID) {
+    return visibility.valid;
+  }
+
+  if (methaneValidity === METHANE_VALID_INVALID) {
+    return visibility.invalid;
+  }
+
+  return false;
+};
 
 const sensorModePresentation = (sensorMode) => {
   if (sensorMode === SENSOR_MODE_AERIS) {
@@ -419,8 +479,170 @@ const estimateEmissionRate = ({
   };
 };
 
+const EMPTY_ANALYSIS_DERIVED = {
+  notebookAnalysisSamples: [],
+  aerisTracerAvailability: {
+    acetylene: false,
+    nitrousOxide: false,
+  },
+  averageMethane: 0,
+  thresholdSamples: 0,
+  confidenceScore: 0,
+  dualPurwayPathStats: {
+    purwaySampleCount: 0,
+    pathLengthSampleCount: 0,
+  },
+  fluxEstimates: {
+    backgroundPpm: DEFAULT_BACKGROUND_PPM,
+    transectWidthM: DEFAULT_TRANSECT_WIDTH_M,
+    mixingHeightM: DEFAULT_MIXING_HEIGHT_M,
+    meanWindNormalMps: 0,
+    windCoverage: 0,
+    massFlux: {
+      massFluxKgS: 0,
+      massFluxKgH: 0,
+      sampleCount: 0,
+      surfaceAreaM2: 0,
+    },
+    emissionRate: {
+      emissionRateKgS: 0,
+      emissionRateKgH: 0,
+      sampleCount: 0,
+      surfaceAreaM2: 0,
+    },
+  },
+};
+
+const computeAnalysisDerivatives = (selectedFlowData, selectedWindow) => {
+  if (!selectedFlowData.length) {
+    return EMPTY_ANALYSIS_DERIVED;
+  }
+
+  const safeStart = Math.max(
+    0,
+    Math.min(selectedWindow.startIndex, selectedFlowData.length - 1),
+  );
+  const safeEnd = Math.max(
+    safeStart,
+    Math.min(selectedWindow.endIndex, selectedFlowData.length - 1),
+  );
+
+  const selectedWindowFlowData = selectedFlowData.slice(safeStart, safeEnd + 1);
+  const notebookAnalysisSamples = selectedWindowFlowData
+    .filter((point) => {
+      const methane = Number(point?.methane ?? 0);
+      return methane >= selectedWindow.ppmMin && methane <= selectedWindow.ppmMax;
+    })
+    .map((point) => ({
+      ts: point.timestampIso || point.ts || null,
+      timestampMs: point.timestampMs ?? null,
+      droneId: point.droneId || null,
+      topic: point.topic || null,
+      latitude: point.latitude ?? null,
+      longitude: point.longitude ?? null,
+      altitude: point.altitude ?? null,
+      methane: Number(point?.methane ?? 0),
+      acetylene: Number(point?.acetylene ?? 0),
+      nitrousOxide: Number(point?.nitrousOxide ?? 0),
+    }));
+
+  const aerisTracerAvailability = {
+    acetylene: notebookAnalysisSamples.some(
+      (point) => Number.isFinite(point?.acetylene) && Number(point.acetylene) > 0,
+    ),
+    nitrousOxide: notebookAnalysisSamples.some(
+      (point) =>
+        Number.isFinite(point?.nitrousOxide) && Number(point.nitrousOxide) > 0,
+    ),
+  };
+
+  const selectedAnalysisFlowData = filterCoordinateOutliers(selectedWindowFlowData);
+  const averageMethane = selectedAnalysisFlowData.length
+    ? selectedAnalysisFlowData.reduce(
+        (sum, point) => sum + Number(point.methane || 0),
+        0,
+      ) / selectedAnalysisFlowData.length
+    : 0;
+
+  const thresholdSamples = selectedAnalysisFlowData.filter(
+    (point) => Number(point.methane || 0) >= 2,
+  ).length;
+
+  const sampleCoverage = Math.min(1, selectedAnalysisFlowData.length / 220);
+  const plumeCoverage = Math.min(1, thresholdSamples / 55);
+  const score = Math.round((sampleCoverage * 0.65 + plumeCoverage * 0.35) * 100);
+  const confidenceScore = Number.isFinite(score)
+    ? Math.max(0, Math.min(100, score))
+    : 0;
+
+  const purwaySamples = selectedAnalysisFlowData.filter(
+    (point) => toFiniteNumber(point.purway) !== null,
+  );
+  const samplesWithPathLength = purwaySamples.filter(
+    (point) => (getPurwayPathLengthMeters(point) ?? 0) > 0,
+  );
+  const dualPurwayPathStats = {
+    purwaySampleCount: purwaySamples.length,
+    pathLengthSampleCount: samplesWithPathLength.length,
+  };
+
+  const methaneValues = selectedAnalysisFlowData
+    .map((point) => getAnalysisMethanePpm(point))
+    .filter((value) => Number.isFinite(value));
+  const backgroundPpm =
+    methaneValues.length >= 5
+      ? quantile(methaneValues, 0.1) ?? DEFAULT_BACKGROUND_PPM
+      : DEFAULT_BACKGROUND_PPM;
+  const transectWidthM = estimateTransectWidthMeters(selectedAnalysisFlowData);
+  const mixingHeightM = estimateMixingHeightMeters(selectedAnalysisFlowData);
+  const windSamples = selectedAnalysisFlowData
+    .map((point) => getWindNormalSpeed(point))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const meanWindNormalMps = windSamples.length
+    ? windSamples.reduce((sum, value) => sum + value, 0) / windSamples.length
+    : 0;
+
+  const fluxEstimates = {
+    backgroundPpm,
+    transectWidthM,
+    mixingHeightM,
+    meanWindNormalMps,
+    windCoverage:
+      selectedAnalysisFlowData.length > 0
+        ? windSamples.length / selectedAnalysisFlowData.length
+        : 0,
+    massFlux: estimateMassFlux({
+      flowData: selectedAnalysisFlowData,
+      backgroundPpm,
+      transectWidthM,
+      mixingHeightM,
+    }),
+    emissionRate: estimateEmissionRate({
+      flowData: selectedAnalysisFlowData,
+      backgroundPpm,
+      transectWidthM,
+      mixingHeightM,
+    }),
+  };
+
+  return {
+    notebookAnalysisSamples,
+    aerisTracerAvailability,
+    averageMethane,
+    thresholdSamples,
+    confidenceScore,
+    dualPurwayPathStats,
+    fluxEstimates,
+  };
+};
+
 const normalizeMissionPoint = (point, index, droneId) => {
+  if (index === 0) {
+    console.log("[normalizeMissionPoint] raw point[0] keys:", Object.keys(point));
+    console.log("[normalizeMissionPoint] raw point[0] methane_valid:", point.methane_valid, "| methaneValid:", point.methaneValid, "| payload keys:", point.payload ? Object.keys(point.payload) : point.payload);
+  }
   const metrics = extractTelemetryMetrics(point);
+  const methaneValidity = getTelemetryMethaneValidity(point);
   const timestampIso =
     point.timestampIso ||
     point.ts ||
@@ -471,6 +693,8 @@ const normalizeMissionPoint = (point, index, droneId) => {
     sniffer: metrics.sniffer,
     purway: metrics.purway,
     methane: metrics.methane,
+    methane_valid: methaneValidity,
+    methaneValid: methaneValidity,
     acetylene: metrics.acetylene,
     nitrousOxide: metrics.nitrousOxide,
     droneId,
@@ -546,6 +770,10 @@ export function ResultsPage({
   const [heatmapViewByMission, setHeatmapViewByMission] = useState({});
   const isHeatmapEnabled = heatmapViewByMission[selectedMissionId] ?? true;
   const [traceOpacity, setTraceOpacity] = useState(1);
+  const [methaneValidityVisibility, setMethaneValidityVisibility] = useState({
+    valid: true,
+    invalid: true,
+  });
   const [isReplayPlaying, setIsReplayPlaying] = useState(false);
   const [isAnalyzeModalOpen, setIsAnalyzeModalOpen] = useState(false);
   const [isNotebookRunning, setIsNotebookRunning] = useState(false);
@@ -559,10 +787,24 @@ export function ResultsPage({
   });
   const replayTimerRef = useRef(null);
   const replayEndIndexRef = useRef(0);
+  const analysisWorkerRef = useRef(null);
+  const analysisRequestIdRef = useRef(0);
+  const analysisInputRef = useRef({
+    selectedFlowData: [],
+    selectedWindow: {
+      startIndex: 0,
+      endIndex: 0,
+      ppmMin: 0,
+      ppmMax: 1,
+    },
+  });
   const deleteAllHoldTimeoutRef = useRef(null);
   const deleteAllHoldIntervalRef = useRef(null);
   const [csvModalFile, setCsvModalFile] = useState(null);
   const [importMessage, setImportMessage] = useState(null);
+  const [analysisDerived, setAnalysisDerived] = useState(
+    EMPTY_ANALYSIS_DERIVED,
+  );
 
   const openCsvPicker = () => {
     const input = document.createElement("input");
@@ -747,6 +989,28 @@ export function ResultsPage({
     );
   }, [selectedMission, selectedResultDroneId]);
 
+  const selectedFlowDataForMap = useMemo(() => {
+    const filtered = selectedFlowData.filter((point) =>
+      shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+    );
+    const counts = { valid: 0, invalid: 0, null: 0 };
+    for (const p of selectedFlowData) {
+      const v = p.methane_valid;
+      if (v === 1) counts.valid++;
+      else if (v === 2) counts.invalid++;
+      else counts.null++;
+    }
+    if (selectedFlowData.length > 0) {
+      const sample = selectedFlowData[0];
+      console.log("[methane_valid filter] sample point keys:", Object.keys(sample));
+      console.log("[methane_valid filter] sample point.methane_valid:", sample.methane_valid, "| typeof payload:", typeof sample.payload, "| payload.methane_valid:", sample.payload?.methane_valid);
+    }
+    console.log(
+      `[methane_valid filter] visibility=${JSON.stringify(methaneValidityVisibility)} | total=${selectedFlowData.length} (valid=1: ${counts.valid}, invalid=2: ${counts.invalid}, null: ${counts.null}) → kept=${filtered.length}, removed=${selectedFlowData.length - filtered.length}`,
+    );
+    return filtered;
+  }, [selectedFlowData, methaneValidityVisibility]);
+
   const droneFilterOptions = useMemo(() => {
     const missionDroneIds = selectedMission?.droneIds || [];
     return [
@@ -782,33 +1046,6 @@ export function ResultsPage({
     [selectedFlowData],
   );
 
-  // DEBUG: Log selectedFlowData structure to diagnose stack overflow
-  if (typeof window !== 'undefined') {
-    try {
-      // Log type and length
-      console.log('selectedFlowData type:', typeof selectedFlowData);
-      if (Array.isArray(selectedFlowData)) {
-        console.log('selectedFlowData.length:', selectedFlowData.length);
-        // Log first 3 elements, safely
-        for (let i = 0; i < Math.min(3, selectedFlowData.length); i++) {
-          const point = selectedFlowData[i];
-          try {
-            console.log(`selectedFlowData[${i}]:`, JSON.stringify(point, (k, v) => (typeof v === 'object' && v !== null ? (v === selectedFlowData ? '[Circular]' : v) : v)));
-          } catch (e) {
-            console.log(`selectedFlowData[${i}]: [Unserializable]`, e);
-          }
-        }
-        // Check for self-reference
-        if (selectedFlowData.includes(selectedFlowData)) {
-          console.error('selectedFlowData contains itself!');
-        }
-      } else {
-        console.error('selectedFlowData is not an array:', selectedFlowData);
-      }
-    } catch (e) {
-      console.error('Error inspecting selectedFlowData:', e);
-    }
-  }
   const maxSelectablePpm = Math.max(1, getTelemetryPeakValue(selectedFlowData));
   const [selectedWindow, setSelectedWindow] = useState({
     startIndex: 0,
@@ -816,6 +1053,66 @@ export function ResultsPage({
     ppmMin: 0,
     ppmMax: maxSelectablePpm,
   });
+
+  useEffect(() => {
+    if (typeof Worker === "undefined") {
+      return undefined;
+    }
+
+    const worker = new Worker(
+      new URL("../workers/resultsAnalysisWorker.js", import.meta.url),
+      { type: "module" },
+    );
+    analysisWorkerRef.current = worker;
+
+    worker.onmessage = (event) => {
+      const payload = event.data || {};
+      if (payload.requestId !== analysisRequestIdRef.current) {
+        return;
+      }
+
+      if (!payload.ok || !payload.result) {
+        const fallback = computeAnalysisDerivatives(
+          analysisInputRef.current.selectedFlowData,
+          analysisInputRef.current.selectedWindow,
+        );
+        setAnalysisDerived(fallback);
+        return;
+      }
+
+      setAnalysisDerived(payload.result);
+    };
+
+    worker.onerror = () => {
+      const fallback = computeAnalysisDerivatives(
+        analysisInputRef.current.selectedFlowData,
+        analysisInputRef.current.selectedWindow,
+      );
+      setAnalysisDerived(fallback);
+    };
+
+    return () => {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+      analysisWorkerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    analysisInputRef.current = { selectedFlowData, selectedWindow };
+
+    const worker = analysisWorkerRef.current;
+    if (!worker) {
+      const fallback = computeAnalysisDerivatives(selectedFlowData, selectedWindow);
+      setAnalysisDerived(fallback);
+      return;
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    analysisRequestIdRef.current = requestId;
+    worker.postMessage({ requestId, selectedFlowData, selectedWindow });
+  }, [selectedFlowData, selectedWindow]);
 
   const clearReplayTimer = useCallback(() => {
     if (replayTimerRef.current) {
@@ -849,8 +1146,8 @@ export function ResultsPage({
   useEffect(() => () => clearReplayTimer(), [clearReplayTimer]);
 
   const activeTraceDataset = useMemo(
-    () => buildTraceDatasetFromFlowData(selectedFlowData),
-    [selectedFlowData],
+    () => buildTraceDatasetFromFlowData(selectedFlowDataForMap),
+    [selectedFlowDataForMap],
   );
 
   const filteredTraceDataset = useMemo(
@@ -858,88 +1155,10 @@ export function ResultsPage({
     [activeTraceDataset, selectedWindow],
   );
 
-  const notebookAnalysisSamples = useMemo(() => {
-    if (!selectedFlowData.length) {
-      return [];
-    }
-
-    const safeStart = Math.max(
-      0,
-      Math.min(selectedWindow.startIndex, selectedFlowData.length - 1),
-    );
-    const safeEnd = Math.max(
-      safeStart,
-      Math.min(selectedWindow.endIndex, selectedFlowData.length - 1),
-    );
-
-    return selectedFlowData
-      .slice(safeStart, safeEnd + 1)
-      .filter((point) => {
-        const methane = Number(point?.methane ?? 0);
-        return methane >= selectedWindow.ppmMin && methane <= selectedWindow.ppmMax;
-      })
-      .map((point) => ({
-        ts: point.timestampIso || point.ts || null,
-        timestampMs: point.timestampMs ?? null,
-        droneId: point.droneId || null,
-        topic: point.topic || null,
-        latitude: point.latitude ?? null,
-        longitude: point.longitude ?? null,
-        altitude: point.altitude ?? null,
-        methane: Number(point?.methane ?? 0),
-        acetylene: Number(point?.acetylene ?? 0),
-        nitrousOxide: Number(point?.nitrousOxide ?? 0),
-      }));
-  }, [selectedFlowData, selectedWindow]);
-  const aerisTracerAvailability = useMemo(
-    () => ({
-      acetylene: notebookAnalysisSamples.some(
-        (point) => Number.isFinite(point?.acetylene) && Number(point.acetylene) > 0,
-      ),
-      nitrousOxide: notebookAnalysisSamples.some(
-        (point) =>
-          Number.isFinite(point?.nitrousOxide) && Number(point.nitrousOxide) > 0,
-      ),
-    }),
-    [notebookAnalysisSamples],
-  );
-  const selectedAnalysisFlowData = useMemo(() => {
-    if (!selectedFlowData.length) {
-      return [];
-    }
-
-    const safeStart = Math.max(
-      0,
-      Math.min(selectedWindow.startIndex, selectedFlowData.length - 1),
-    );
-    const safeEnd = Math.max(
-      safeStart,
-      Math.min(selectedWindow.endIndex, selectedFlowData.length - 1),
-    );
-
-    return filterCoordinateOutliers(
-      selectedFlowData.slice(safeStart, safeEnd + 1),
-    );
-  }, [selectedFlowData, selectedWindow]);
-
-  const averageMethane = useMemo(() => {
-    if (!selectedAnalysisFlowData.length) {
-      return 0;
-    }
-
-    const total = selectedAnalysisFlowData.reduce(
-      (sum, point) => sum + Number(point.methane || 0),
-      0,
-    );
-    return total / selectedAnalysisFlowData.length;
-  }, [selectedAnalysisFlowData]);
-
-  const thresholdSamples = useMemo(
-    () =>
-      selectedAnalysisFlowData.filter((point) => Number(point.methane || 0) >= 2)
-        .length,
-    [selectedAnalysisFlowData],
-  );
+  const notebookAnalysisSamples = analysisDerived.notebookAnalysisSamples;
+  const aerisTracerAvailability = analysisDerived.aerisTracerAvailability;
+  const averageMethane = analysisDerived.averageMethane;
+  const thresholdSamples = analysisDerived.thresholdSamples;
 
   const analysisReadiness = useMemo(() => {
     if (!selectedMission || selectedFlowData.length === 0) {
@@ -965,28 +1184,8 @@ export function ResultsPage({
     };
   }, [selectedMission, selectedFlowData.length]);
 
-  const confidenceScore = useMemo(() => {
-    const sampleCoverage = Math.min(1, selectedAnalysisFlowData.length / 220);
-    const plumeCoverage = Math.min(1, thresholdSamples / 55);
-    const score = Math.round(
-      (sampleCoverage * 0.65 + plumeCoverage * 0.35) * 100,
-    );
-    return Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0;
-  }, [selectedAnalysisFlowData.length, thresholdSamples]);
-
-  const dualPurwayPathStats = useMemo(() => {
-    const purwaySamples = selectedAnalysisFlowData.filter(
-      (point) => toFiniteNumber(point.purway) !== null,
-    );
-    const samplesWithPathLength = purwaySamples.filter(
-      (point) => (getPurwayPathLengthMeters(point) ?? 0) > 0,
-    );
-
-    return {
-      purwaySampleCount: purwaySamples.length,
-      pathLengthSampleCount: samplesWithPathLength.length,
-    };
-  }, [selectedAnalysisFlowData]);
+  const confidenceScore = analysisDerived.confidenceScore;
+  const dualPurwayPathStats = analysisDerived.dualPurwayPathStats;
 
   const isDualEstimateBlocked =
     isDualSensorAnalysis &&
@@ -998,46 +1197,7 @@ export function ResultsPage({
     dualPurwayPathStats.pathLengthSampleCount <
       dualPurwayPathStats.purwaySampleCount;
 
-  const fluxEstimates = useMemo(() => {
-    const methaneValues = selectedAnalysisFlowData
-      .map((point) => getAnalysisMethanePpm(point))
-      .filter((value) => Number.isFinite(value));
-    const backgroundPpm =
-      methaneValues.length >= 5
-        ? quantile(methaneValues, 0.1) ?? DEFAULT_BACKGROUND_PPM
-        : DEFAULT_BACKGROUND_PPM;
-    const transectWidthM = estimateTransectWidthMeters(selectedAnalysisFlowData);
-    const mixingHeightM = estimateMixingHeightMeters(selectedAnalysisFlowData);
-    const windSamples = selectedAnalysisFlowData
-      .map((point) => getWindNormalSpeed(point))
-      .filter((value) => Number.isFinite(value) && value > 0);
-    const meanWindNormalMps = windSamples.length
-      ? windSamples.reduce((sum, value) => sum + value, 0) / windSamples.length
-      : 0;
-
-    return {
-      backgroundPpm,
-      transectWidthM,
-      mixingHeightM,
-      meanWindNormalMps,
-      windCoverage:
-        selectedAnalysisFlowData.length > 0
-          ? windSamples.length / selectedAnalysisFlowData.length
-          : 0,
-      massFlux: estimateMassFlux({
-        flowData: selectedAnalysisFlowData,
-        backgroundPpm,
-        transectWidthM,
-        mixingHeightM,
-      }),
-      emissionRate: estimateEmissionRate({
-        flowData: selectedAnalysisFlowData,
-        backgroundPpm,
-        transectWidthM,
-        mixingHeightM,
-      }),
-    };
-  }, [selectedAnalysisFlowData]);
+  const fluxEstimates = analysisDerived.fluxEstimates;
 
   const analysisMethods = useMemo(
     () => [
@@ -1190,6 +1350,25 @@ export function ResultsPage({
       ppmMax: maxSelectablePpm,
     });
   };
+
+  const handleToggleMethaneValidityVisibility = useCallback((key) => {
+    setMethaneValidityVisibility((previous) => {
+      if (key !== "valid" && key !== "invalid") {
+        return previous;
+      }
+
+      const next = {
+        ...previous,
+        [key]: !previous[key],
+      };
+
+      if (!next.valid && !next.invalid) {
+        next[key] = true;
+      }
+
+      return next;
+    });
+  }, []);
 
   const handleDeleteMission = async (missionId) => {
     if (!missionId || deletingMissionId) {
@@ -2284,6 +2463,11 @@ export function ResultsPage({
                 heatmapEnabled={isHeatmapEnabled}
                 plumeViewEnabled={isPlumeViewEnabled}
                 traceOpacity={traceOpacity}
+                showMethaneValidityControls={!isAerisAnalysis}
+                methaneValidityVisibility={methaneValidityVisibility}
+                onToggleMethaneValidity={
+                  handleToggleMethaneValidityVisibility
+                }
                 onToggleHeatmap={() => {
                   if (!selectedMissionId) {
                     return;

@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
-import m350Marker from "../assets/M350.png";
 import satelliteImage from "../assets/satellite.png";
 import { tw, color } from "../constants/tailwind";
 import {
@@ -397,6 +396,8 @@ export function Map({
   onToggleAllPlottedData,
   droneVisibilityById = {},
   onToggleDroneVisibility,
+  methaneValidityVisibility = { valid: true, invalid: true },
+  onToggleMethaneValidity,
   resultsPageMode,
   heatmapEnabled = true,
   plumeViewEnabled = false,
@@ -1618,7 +1619,8 @@ export function Map({
             style={{ backgroundColor: color.surface, borderColor: color.border }}
           >
             {!resultsPageMode ? (
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => onToggleAllPlottedData?.()}
@@ -1668,6 +1670,55 @@ export function Map({
                     );
                   })}
                 </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span
+                    className="text-xs font-semibold uppercase tracking-[0.12em]"
+                    style={{ color: color.textMuted }}
+                  >
+                    Methane Valid
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onToggleMethaneValidity?.("valid")}
+                    className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                    style={{
+                      backgroundColor: methaneValidityVisibility.valid
+                        ? `${color.green}22`
+                        : color.card,
+                      borderColor: methaneValidityVisibility.valid
+                        ? color.green
+                        : color.border,
+                      color: methaneValidityVisibility.valid
+                        ? color.text
+                        : color.textMuted,
+                    }}
+                  >
+                    Valid (1)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onToggleMethaneValidity?.("invalid")}
+                    className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                    style={{
+                      backgroundColor: methaneValidityVisibility.invalid
+                        ? `${color.orange}22`
+                        : color.card,
+                      borderColor: methaneValidityVisibility.invalid
+                        ? color.orange
+                        : color.border,
+                      color: methaneValidityVisibility.invalid
+                        ? color.text
+                        : color.textMuted,
+                    }}
+                  >
+                    Invalid (2)
+                  </button>
+                  <span className="text-[11px]" style={{ color: color.textDim }}>
+                    0 = no data (hidden)
+                  </span>
+                </div>
               </div>
             ) : null}
 
@@ -1701,6 +1752,50 @@ export function Map({
                     />
                   </button>
                   <span className="text-sm" style={{ color: color.textMuted }}>Plume View</span>
+                </div>
+              ) : null}
+
+              {resultsPageMode ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs" style={{ color: color.textMuted }}>
+                    Methane Valid
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onToggleMethaneValidity?.("valid")}
+                    className="rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                    style={{
+                      backgroundColor: methaneValidityVisibility.valid
+                        ? `${color.green}22`
+                        : color.card,
+                      borderColor: methaneValidityVisibility.valid
+                        ? color.green
+                        : color.border,
+                      color: methaneValidityVisibility.valid
+                        ? color.text
+                        : color.textMuted,
+                    }}
+                  >
+                    1
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onToggleMethaneValidity?.("invalid")}
+                    className="rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                    style={{
+                      backgroundColor: methaneValidityVisibility.invalid
+                        ? `${color.orange}22`
+                        : color.card,
+                      borderColor: methaneValidityVisibility.invalid
+                        ? color.orange
+                        : color.border,
+                      color: methaneValidityVisibility.invalid
+                        ? color.text
+                        : color.textMuted,
+                    }}
+                  >
+                    2
+                  </button>
                 </div>
               ) : null}
 

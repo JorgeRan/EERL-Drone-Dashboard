@@ -1164,6 +1164,14 @@ const resolveTopic = (payload, fallbackTopic) => {
   return fallbackTopic;
 };
 
+const REQUIRED_FLIGHT_STATUS = 2;
+
+const getFlightStatus = (payload) =>
+  pickNumber(payload?.flight_status, payload?.flightStatus);
+
+const shouldIngestTelemetry = (payload) =>
+  getFlightStatus(payload) === REQUIRED_FLIGHT_STATUS;
+
 const normalizeTelemetry = (topic, rawPayload) => {
   const droneId = parseDroneId(topic, rawPayload);
   const ts = parseTimestamp(
@@ -1198,6 +1206,11 @@ const normalizeTelemetry = (topic, rawPayload) => {
     rawPayload.c2h4,
     rawPayload.aeris?.ethylene,
   );
+  const methaneValid = pickNumber(
+    rawPayload.methane_valid,
+    rawPayload.methaneValid,
+  );
+  const flightStatus = getFlightStatus(rawPayload);
   const explicitMethane = pickNumber(
     rawPayload.methane,
     rawPayload.methane_ppm,
@@ -1297,6 +1310,8 @@ const normalizeTelemetry = (topic, rawPayload) => {
     acetylene,
     nitrousOxide,
     ethylene,
+    methaneValid,
+    flightStatus,
     sensorMode,
     methane,
     distance: pickNumber(rawPayload.distance),
@@ -1313,6 +1328,8 @@ const normalizeTelemetry = (topic, rawPayload) => {
       acetylene,
       nitrousOxide,
       ethylene,
+      methane_valid: methaneValid,
+      flight_status: flightStatus,
     },
   };
 };
@@ -1340,6 +1357,8 @@ const telemetryToClientPayload = (telemetry, includeMetrics = true) => {
     acetylene: telemetry.acetylene,
     nitrousOxide: telemetry.nitrousOxide,
     ethylene: telemetry.ethylene,
+    methane_valid: telemetry.methaneValid,
+    flight_status: telemetry.flightStatus,
     sensorMode: telemetry.sensorMode,
     methane: telemetry.methane,
     distance: telemetry.distance,
@@ -1940,6 +1959,10 @@ const upsertTelemetry = async (telemetry) => {
 };
 
 const ingestTelemetry = async ({ source, receivedTopic, rawPayload }) => {
+  if (!shouldIngestTelemetry(rawPayload)) {
+    return;
+  }
+
   const telemetry = normalizeTelemetry(receivedTopic, rawPayload);
 
   const coordinateOutlierReason = await getTelemetryCoordinateOutlierReason(
@@ -2037,7 +2060,7 @@ client.on("message", async (receivedTopic, message) => {
     const rawPayload = JSON.parse(message.toString());
     // Batch payload support: { d: "droneId", b: [[...], ...] }
     if (rawPayload && typeof rawPayload.d === "string" && Array.isArray(rawPayload.b)) {
-      // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z]
+      // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z, methane_valid, flight_status]
       const batchDroneId = rawPayload.d;
       for (const row of rawPayload.b) {
         if (!Array.isArray(row)) continue;
@@ -2053,7 +2076,9 @@ client.on("message", async (receivedTopic, message) => {
           target_longitude,
           wind_x,
           wind_y,
-          wind_z
+          wind_z,
+          methane_valid,
+          flight_status
         ] = row;
         const batchPayload = {
           droneId: batchDroneId,
@@ -2068,7 +2093,9 @@ client.on("message", async (receivedTopic, message) => {
           target_longitude,
           wind_u: wind_x,
           wind_v: wind_y,
-          wind_w: wind_z
+          wind_w: wind_z,
+          methane_valid,
+          flight_status
         };
         const normalizedTopic = resolveTopic(batchPayload, receivedTopic);
         await ingestTelemetry({
@@ -2078,7 +2105,7 @@ client.on("message", async (receivedTopic, message) => {
         });
       }
     } else if (Array.isArray(rawPayload)) {
-      // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z]
+      // Field order: [timestamp, methane, sniffer_methane, distance, latitude, longitude, altitude, targ_latitude, targ_longitude, wind_x, wind_y, wind_z, methane_valid, flight_status]
       console.log("Received array payload, mapping to telemetry fields:", rawPayload);
       const [
         timestamp,
@@ -2092,7 +2119,9 @@ client.on("message", async (receivedTopic, message) => {
         target_longitude,
         wind_x,
         wind_y,
-        wind_z
+        wind_z,
+        methane_valid,
+        flight_status
       ] = rawPayload;
       const batchPayload = {
         timestamp,
@@ -2106,7 +2135,9 @@ client.on("message", async (receivedTopic, message) => {
         target_longitude,
         wind_u: wind_x,
         wind_v: wind_y,
-        wind_w: wind_z
+        wind_w: wind_z,
+        methane_valid,
+        flight_status
       };
       const normalizedTopic = resolveTopic(batchPayload, receivedTopic);
       await ingestTelemetry({
