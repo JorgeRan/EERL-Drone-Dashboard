@@ -1,9 +1,25 @@
 const SENSOR_MODE_AERIS = "aeris";
 const SENSOR_MODE_DUAL = "dual";
+const REQUIRED_FLIGHT_STATUS = 2;
 
 const parseNumber = (value) => {
   const parsed = Number(String(value ?? "").trim());
   return Number.isFinite(parsed) ? parsed : null;
+};
+
+const shouldDisplayTelemetry = (source) => {
+  const flightStatus =
+    parseNumber(source?.flight_status) ??
+    parseNumber(source?.flightStatus) ??
+    parseNumber(source?.payload?.flight_status) ??
+    parseNumber(source?.payload?.flightStatus);
+
+  // Keep telemetry visible when flight_status is missing.
+  if (flightStatus === null) {
+    return true;
+  }
+
+  return flightStatus === REQUIRED_FLIGHT_STATUS;
 };
 
 const COORDINATE_OUTLIER_MAX_DISTANCE_METERS = 1000;
@@ -344,6 +360,7 @@ const parseStandardCsvToMissionResults = (
   const droneIdx = idx("drone", "drone_name", "drone_id", "droneid");
   const sensorModeIdx = idx("sensor_mode", "sensor_type", "sensor");
   const methaneValidIdx = idx("methane_valid", "methanevalid", "methane_validity");
+  const flightStatusIdx = idx("flight_status", "flightstatus");
 
   if (timeIdx === -1 && (gpsDateIdx === -1 || gpsTimeIdx === -1)) return null;
 
@@ -422,12 +439,14 @@ const parseStandardCsvToMissionResults = (
       wind_v: windVIdx !== -1 ? parseNumber(cols[windVIdx]) : null,
       wind_w: windWIdx !== -1 ? parseNumber(cols[windWIdx]) : null,
       methane_valid: methaneValidIdx !== -1 ? parseNumber(cols[methaneValidIdx]) : null,
+      flight_status: flightStatusIdx !== -1 ? parseNumber(cols[flightStatusIdx]) : null,
       payload: {
         source_latitude: droneLatitude,
         source_longitude: droneLongitude,
         target_latitude: targetLatitude,
         target_longitude: targetLongitude,
         map_coordinates: useTargetCoordinates ? "target" : "drone",
+        flight_status: flightStatusIdx !== -1 ? parseNumber(cols[flightStatusIdx]) : null,
       },
     };
 
@@ -443,6 +462,7 @@ const parseStandardCsvToMissionResults = (
     .map(([drone, data]) => ({
       drone,
       data: data
+        .filter(shouldDisplayTelemetry)
         .filter((point) => Number.isFinite(point.timestampMs))
         .sort((a, b) => a.timestampMs - b.timestampMs),
     }))
@@ -550,6 +570,10 @@ const parseAerisCsvToMissionResults = (
   const windUIdx = findHeaderIndex(headers, (header) => header.endsWith(".velx"));
   const windVIdx = findHeaderIndex(headers, (header) => header.endsWith(".vely"));
   const windWIdx = findHeaderIndex(headers, (header) => header.endsWith(".velz"));
+  const flightStatusIdx = findHeaderIndex(
+    headers,
+    (header) => header === "flight_status" || header.endsWith(".flight_status"),
+  );
 
   if (timeIdx === -1) {
     return null;
@@ -596,6 +620,12 @@ const parseAerisCsvToMissionResults = (
     const windU = windUIdx !== -1 ? parseNumber(cols[windUIdx]) : null;
     const windV = windVIdx !== -1 ? parseNumber(cols[windVIdx]) : null;
     const windW = windWIdx !== -1 ? parseNumber(cols[windWIdx]) : null;
+    const flightStatus =
+      flightStatusIdx !== -1 ? parseNumber(cols[flightStatusIdx]) : null;
+
+    if (!shouldDisplayTelemetry({ flight_status: flightStatus })) {
+      continue;
+    }
 
     const updates = {
       methane,

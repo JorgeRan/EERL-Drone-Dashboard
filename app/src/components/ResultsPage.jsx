@@ -51,6 +51,47 @@ const DEFAULT_MIXING_HEIGHT_M = 25.0;
 const DELETE_ALL_HOLD_MS = 2000;
 const METHANE_VALID_VALID = 1;
 const METHANE_VALID_INVALID = 2;
+const START_POINT_FILTER_DEFAULT_RADIUS_METERS = 25;
+
+const filterFlowPointsOutsideStartRadius = (
+  flowPoints,
+  { enabled, startPoint, radiusMeters },
+) => {
+  const points = Array.isArray(flowPoints) ? flowPoints : [];
+
+  if (
+    !enabled ||
+    !startPoint ||
+    !Number.isFinite(startPoint.latitude) ||
+    !Number.isFinite(startPoint.longitude) ||
+    !Number.isFinite(radiusMeters) ||
+    radiusMeters <= 0
+  ) {
+    return points;
+  }
+
+  return points.filter((point) => {
+    const latitude = Number(point?.latitude);
+    const longitude = Number(point?.longitude);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return true;
+    }
+
+    const distanceMeters = calculateDistanceMeters(
+      startPoint.latitude,
+      startPoint.longitude,
+      latitude,
+      longitude,
+    );
+
+    if (!Number.isFinite(distanceMeters)) {
+      return true;
+    }
+
+    return distanceMeters > radiusMeters;
+  });
+};
 
 const resolveRawMethaneValidity = (source) => {
   const candidates = [
@@ -781,6 +822,12 @@ export function ResultsPage({
     invalid: true,
     noData: false,
   });
+  const [startPointFilterEnabled, setStartPointFilterEnabled] = useState(false);
+  const [startPointFilterRadiusMeters, setStartPointFilterRadiusMeters] =
+    useState(START_POINT_FILTER_DEFAULT_RADIUS_METERS);
+  const [startPointPickModeEnabled, setStartPointPickModeEnabled] =
+    useState(false);
+  const [startPointCoordinates, setStartPointCoordinates] = useState(null);
   const [isReplayPlaying, setIsReplayPlaying] = useState(false);
   const [isAnalyzeModalOpen, setIsAnalyzeModalOpen] = useState(false);
   const [isNotebookRunning, setIsNotebookRunning] = useState(false);
@@ -1059,6 +1106,12 @@ export function ResultsPage({
     }
   }, [selectedMission, selectedResultDroneId]);
 
+  useEffect(() => {
+    setStartPointCoordinates(null);
+    setStartPointPickModeEnabled(false);
+    setStartPointFilterEnabled(false);
+  }, [selectedMissionId, selectedResultDroneId]);
+
   const selectedFlowData = useMemo(() => {
     if (!selectedMission?.flowData) {
       return [];
@@ -1095,6 +1148,21 @@ export function ResultsPage({
     );
     return filtered;
   }, [selectedFlowData, methaneValidityVisibility]);
+
+  const selectedFlowDataForMapWithStartFilter = useMemo(
+    () =>
+      filterFlowPointsOutsideStartRadius(selectedFlowDataForMap, {
+        enabled: startPointFilterEnabled,
+        startPoint: startPointCoordinates,
+        radiusMeters: startPointFilterRadiusMeters,
+      }),
+    [
+      selectedFlowDataForMap,
+      startPointCoordinates,
+      startPointFilterEnabled,
+      startPointFilterRadiusMeters,
+    ],
+  );
 
   const droneFilterOptions = useMemo(() => {
     const missionDroneIds = selectedMission?.droneIds || [];
@@ -1277,13 +1345,13 @@ export function ResultsPage({
   useEffect(() => () => clearReplayTimer(), [clearReplayTimer]);
 
   const activeTraceDataset = useMemo(
-    () => buildTraceDatasetFromFlowData(selectedFlowDataForMap),
-    [selectedFlowDataForMap],
+    () => buildTraceDatasetFromFlowData(selectedFlowDataForMapWithStartFilter),
+    [selectedFlowDataForMapWithStartFilter],
   );
 
   const tracePointsForMap = useMemo(
-    () => buildDeckTracePointsFromFlowData(selectedFlowDataForMap),
-    [selectedFlowDataForMap],
+    () => buildDeckTracePointsFromFlowData(selectedFlowDataForMapWithStartFilter),
+    [selectedFlowDataForMapWithStartFilter],
   );
 
   const filteredTraceDataset = useMemo(
@@ -2645,6 +2713,21 @@ export function ResultsPage({
                           [selectedMissionId]: enabled,
                         };
                       });
+                    }}
+                    startPointFilterEnabled={startPointFilterEnabled}
+                    onToggleStartPointFilter={() =>
+                      setStartPointFilterEnabled((previous) => !previous)
+                    }
+                    startPointFilterRadiusMeters={startPointFilterRadiusMeters}
+                    onStartPointFilterRadiusChange={setStartPointFilterRadiusMeters}
+                    startPointPickModeEnabled={startPointPickModeEnabled}
+                    onStartPointPickModeChange={setStartPointPickModeEnabled}
+                    startPointCoordinates={startPointCoordinates}
+                    onSetStartPointCoordinates={setStartPointCoordinates}
+                    onClearStartPointCoordinates={() => {
+                      setStartPointCoordinates(null);
+                      setStartPointPickModeEnabled(false);
+                      setStartPointFilterEnabled(false);
                     }}
                     onTraceRenderComplete={handleMapTraceRenderComplete}
                     missionConfiguration={sensorsMode}

@@ -416,6 +416,145 @@ const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
 const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
 const TELEMETRY_FLUSH_INTERVAL_MS = 120;
 const LIVE_TELEMETRY_RENDER_LIMIT = 4000;
+const DASHBOARD_MAP_RECENT_POINTS_PER_DRONE = 1000;
+const DASHBOARD_MAP_SNAPSHOT_POINTS_PER_DRONE = 250;
+const DASHBOARD_START_POINT_FILTER_DEFAULT_RADIUS_METERS = 25;
+
+const compactDashboardMapSeries = (
+  series,
+  {
+    recentPointsPerDrone = DASHBOARD_MAP_RECENT_POINTS_PER_DRONE,
+    snapshotPointsPerDrone = DASHBOARD_MAP_SNAPSHOT_POINTS_PER_DRONE,
+  } = {},
+) => {
+  const points = Array.isArray(series) ? series : [];
+
+  if (!points.length) {
+    return points;
+  }
+
+  const safeRecentPoints = Math.max(1, Math.floor(recentPointsPerDrone));
+  const safeSnapshotPoints = Math.max(1, Math.floor(snapshotPointsPerDrone));
+  const groupedByDrone = new globalThis.Map();
+
+  points.forEach((point) => {
+    const droneId = String(point?.droneId || "unknown").trim() || "unknown";
+    const existingGroup = groupedByDrone.get(droneId);
+
+    if (existingGroup) {
+      existingGroup.push(point);
+      return;
+    }
+
+    groupedByDrone.set(droneId, [point]);
+  });
+
+  const compacted = [];
+
+  groupedByDrone.forEach((dronePoints) => {
+    if (dronePoints.length <= safeRecentPoints) {
+      compacted.push(...dronePoints);
+      return;
+    }
+
+    const historyCutoff = dronePoints.length - safeRecentPoints;
+    const olderPoints = dronePoints.slice(0, historyCutoff);
+    const recentPoints = dronePoints.slice(historyCutoff);
+    const snapshotStep = Math.max(
+      1,
+      Math.ceil(olderPoints.length / safeSnapshotPoints),
+    );
+    const snapshotPoints = olderPoints.filter(
+      (_, index) =>
+        index % snapshotStep === 0 || index === olderPoints.length - 1,
+    );
+
+    compacted.push(...snapshotPoints, ...recentPoints);
+  });
+
+  return compacted
+    .slice()
+    .sort((left, right) => {
+      const leftTimestamp = Number(left?.timestampMs ?? left?.sampleOrder ?? 0);
+      const rightTimestamp = Number(right?.timestampMs ?? right?.sampleOrder ?? 0);
+      return leftTimestamp - rightTimestamp;
+    })
+    .map((point, index) => ({
+      ...point,
+      sampleOrder: index,
+      sampleIndex: index + 1,
+    }));
+};
+
+const toDashboardMapTracePoint = (point) => ({
+  id: point.id,
+  droneId: point.droneId,
+  sampleOrder: point.sampleOrder,
+  sampleIndex: point.sampleIndex,
+  timestampMs: point.timestampMs,
+  timestampIso: point.timestampIso,
+  timeLabel: point.timeLabel,
+  altitude: point.altitude,
+  methane: point.methane,
+  methaneValid: point.methaneValid,
+  displayMetricLabel: point.displayMetricLabel,
+  displayMetricUnits: point.displayMetricUnits,
+  sniffer: point.sniffer,
+  purway: point.purway,
+  ch4: point.ch4,
+  acetylene: point.acetylene,
+  nitrousOxide: point.nitrousOxide,
+  sensorMode: point.sensorMode,
+  sourceLatitude: point.sourceLatitude,
+  sourceLongitude: point.sourceLongitude,
+  targetLatitude: point.targetLatitude,
+  targetLongitude: point.targetLongitude,
+  mapCoordinates: point.mapCoordinates,
+  detected: point.detected,
+  pointColor: point.pointColor,
+  latitude: point.latitude,
+  longitude: point.longitude,
+});
+
+const filterFlowPointsOutsideStartRadius = (
+  flowPoints,
+  { enabled, startPoint, radiusMeters },
+) => {
+  const points = Array.isArray(flowPoints) ? flowPoints : [];
+
+  if (
+    !enabled ||
+    !startPoint ||
+    !Number.isFinite(startPoint.latitude) ||
+    !Number.isFinite(startPoint.longitude) ||
+    !Number.isFinite(radiusMeters) ||
+    radiusMeters <= 0
+  ) {
+    return points;
+  }
+
+  return points.filter((point) => {
+    const latitude = Number(point?.latitude);
+    const longitude = Number(point?.longitude);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return true;
+    }
+
+    const distanceMeters = calculateDistanceMeters(
+      startPoint.latitude,
+      startPoint.longitude,
+      latitude,
+      longitude,
+    );
+
+    if (!Number.isFinite(distanceMeters)) {
+      return true;
+    }
+
+    return distanceMeters > radiusMeters;
+  });
+};
 
 function App() {
   const [currentView, setCurrentView] = useState("dashboard");
@@ -454,6 +593,12 @@ function App() {
     }, {}),
   );
   const [plumeViewEnabled, setPlumeViewEnabled] = useState(false);
+  const [startPointFilterEnabled, setStartPointFilterEnabled] = useState(false);
+  const [startPointFilterRadiusMeters, setStartPointFilterRadiusMeters] =
+    useState(DASHBOARD_START_POINT_FILTER_DEFAULT_RADIUS_METERS);
+  const [startPointPickModeEnabled, setStartPointPickModeEnabled] =
+    useState(false);
+  const [startPointCoordinates, setStartPointCoordinates] = useState(null);
   const liveFlowData = useMemo(() => {
     const selectedDroneData = liveTelemetryByDrone[selectedDeviceId];
     if (Array.isArray(selectedDroneData) && selectedDroneData.length > 0) {
@@ -590,23 +735,6 @@ function App() {
           const updatedSeries = appendFlowPoints(currentSeries, telemetryRows, {
             maxPoints: LIVE_TELEMETRY_RENDER_LIMIT,
           });
-
-          if (updatedSeries !== currentSeries) {
-            next[droneId] = updatedSeries;
-            changed = true;
-          }
-        });
-
-        return changed ? next : previous;
-      });
-
-      setRecordedFlowDataByDrone((previous) => {
-        let changed = false;
-        const next = { ...previous };
-
-        queuedEntries.forEach(([droneId, telemetryRows]) => {
-          const currentSeries = previous[droneId] || [];
-          const updatedSeries = appendFlowPoints(currentSeries, telemetryRows);
 
           if (updatedSeries !== currentSeries) {
             next[droneId] = updatedSeries;
@@ -805,22 +933,34 @@ function App() {
   const dashboardMapTracePoints = useMemo(
     () =>
       buildDeckTracePointsFromFlowData(
-        buildCombinedFlowDataForDrones({
-          devices,
-          measurementTraceByDrone,
-          liveTelemetryByDrone,
-          recordedFlowDataByDrone,
-          visibleDroneIds: visibleDashboardDroneIds,
-        }).filter((point) =>
-          shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+        compactDashboardMapSeries(
+          filterFlowPointsOutsideStartRadius(
+            buildCombinedFlowDataForDrones({
+              devices,
+              measurementTraceByDrone,
+              liveTelemetryByDrone,
+              recordedFlowDataByDrone,
+              visibleDroneIds: visibleDashboardDroneIds,
+            }).filter((point) =>
+              shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+            ),
+            {
+              enabled: startPointFilterEnabled,
+              startPoint: startPointCoordinates,
+              radiusMeters: startPointFilterRadiusMeters,
+            },
+          ),
         ),
-      ),
+      ).map(toDashboardMapTracePoint),
     [
       measurementTraceByDrone,
       liveTelemetryByDrone,
       recordedFlowDataByDrone,
       visibleDashboardDroneIds,
       methaneValidityVisibility,
+      startPointCoordinates,
+      startPointFilterEnabled,
+      startPointFilterRadiusMeters,
     ],
   );
 
@@ -1513,6 +1653,21 @@ function App() {
                   onTogglePlumeView={() =>
                     setPlumeViewEnabled((previous) => !previous)
                   }
+                  startPointFilterEnabled={startPointFilterEnabled}
+                  onToggleStartPointFilter={() =>
+                    setStartPointFilterEnabled((previous) => !previous)
+                  }
+                  startPointFilterRadiusMeters={startPointFilterRadiusMeters}
+                  onStartPointFilterRadiusChange={setStartPointFilterRadiusMeters}
+                  startPointPickModeEnabled={startPointPickModeEnabled}
+                  onStartPointPickModeChange={setStartPointPickModeEnabled}
+                  startPointCoordinates={startPointCoordinates}
+                  onSetStartPointCoordinates={setStartPointCoordinates}
+                  onClearStartPointCoordinates={() => {
+                    setStartPointCoordinates(null);
+                    setStartPointPickModeEnabled(false);
+                    setStartPointFilterEnabled(false);
+                  }}
                   resultsPageMode={false}
                   onPlumeViewAutoChange={setPlumeViewEnabled}
                 />

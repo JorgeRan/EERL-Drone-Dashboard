@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 // import { Map, NavigationControl, Popup, useControl } from "react-map-gl/mapbox";
-import { GeoJsonLayer, ArcLayer } from 'deck.gl';
+import { GeoJsonLayer, ArcLayer } from "deck.gl";
 import satelliteImage from "../assets/satellite.png";
 import { tw, color } from "../constants/tailwind";
 import {
@@ -158,7 +158,11 @@ const buildTraceDatasetFromTracePoints = (tracePoints) => {
   return {
     type: "FeatureCollection",
     features: points
-      .filter((point) => Number.isFinite(Number(point?.longitude)) && Number.isFinite(Number(point?.latitude)))
+      .filter(
+        (point) =>
+          Number.isFinite(Number(point?.longitude)) &&
+          Number.isFinite(Number(point?.latitude)),
+      )
       .map((point, index) => ({
         type: "Feature",
         geometry: {
@@ -166,7 +170,9 @@ const buildTraceDatasetFromTracePoints = (tracePoints) => {
           coordinates: [Number(point.longitude), Number(point.latitude)],
         },
         properties: {
-          id: point.id ?? `trace-${point.droneId || "drone"}-${point.timestampMs || point.sampleOrder || index}`,
+          id:
+            point.id ??
+            `trace-${point.droneId || "drone"}-${point.timestampMs || point.sampleOrder || index}`,
           droneId: point.droneId || null,
           sampleOrder: point.sampleOrder ?? index,
           sampleIndex: point.sampleIndex ?? index + 1,
@@ -185,9 +191,14 @@ const buildTraceDatasetFromTracePoints = (tracePoints) => {
           displayMetricUnits: point.displayMetricUnits,
           sourceLatitude: Number(point.sourceLatitude ?? point.latitude),
           sourceLongitude: Number(point.sourceLongitude ?? point.longitude),
-          targetLatitude: Number(point.targetLatitude ?? point.target_latitude ?? point.latitude),
-          targetLongitude: Number(point.targetLongitude ?? point.target_longitude ?? point.longitude),
-          mapCoordinates: point.mapCoordinates ?? point.payload?.map_coordinates ?? "drone",
+          targetLatitude: Number(
+            point.targetLatitude ?? point.target_latitude ?? point.latitude,
+          ),
+          targetLongitude: Number(
+            point.targetLongitude ?? point.target_longitude ?? point.longitude,
+          ),
+          mapCoordinates:
+            point.mapCoordinates ?? point.payload?.map_coordinates ?? "drone",
           detected: Boolean(point.detected),
           pointColor: point.pointColor,
         },
@@ -201,7 +212,11 @@ const isAllDroneSelection = (selectedDroneId) => {
   }
 
   const normalizedValue = String(selectedDroneId).trim().toLowerCase();
-  return !normalizedValue || normalizedValue === "all" || normalizedValue === "all-data";
+  return (
+    !normalizedValue ||
+    normalizedValue === "all" ||
+    normalizedValue === "all-data"
+  );
 };
 
 const buildTraceFlightPathFeatureCollection = (traceDataset) => {
@@ -215,7 +230,9 @@ const buildTraceFlightPathFeatureCollection = (traceDataset) => {
       const sourceLongitude = toFiniteNumber(
         feature?.properties?.sourceLongitude,
       );
-      const sourceLatitude = toFiniteNumber(feature?.properties?.sourceLatitude);
+      const sourceLatitude = toFiniteNumber(
+        feature?.properties?.sourceLatitude,
+      );
 
       if (Number.isFinite(sourceLongitude) && Number.isFinite(sourceLatitude)) {
         return [sourceLongitude, sourceLatitude];
@@ -267,7 +284,9 @@ const buildLiveFlightPathFeatureCollection = (
         return false;
       }
 
-      return hasVisibilityFilter ? true : showAllDrones || droneId === selectedDroneId;
+      return hasVisibilityFilter
+        ? true
+        : showAllDrones || droneId === selectedDroneId;
     })
     .map(([droneId, coordinates]) => ({
       type: "Feature",
@@ -310,8 +329,10 @@ const buildDisplayedTraceDataset = (
         const tLon = toFiniteNumber(properties.targetLongitude);
         const tLat = toFiniteNumber(properties.targetLatitude);
         const isValidTarget =
-          tLon !== 0 && tLat !== 0 &&
-          Number.isFinite(tLon) && Number.isFinite(tLat);
+          tLon !== 0 &&
+          tLat !== 0 &&
+          Number.isFinite(tLon) &&
+          Number.isFinite(tLat);
         if (isValidTarget) {
           longitude = tLon;
           latitude = tLat;
@@ -322,8 +343,12 @@ const buildDisplayedTraceDataset = (
           mapCoordinates = "drone";
         }
       } else {
-        longitude = toFiniteNumber(properties.sourceLongitude) ?? toFiniteNumber(properties.targetLongitude);
-        latitude = toFiniteNumber(properties.sourceLatitude) ?? toFiniteNumber(properties.targetLatitude);
+        longitude =
+          toFiniteNumber(properties.sourceLongitude) ??
+          toFiniteNumber(properties.targetLongitude);
+        latitude =
+          toFiniteNumber(properties.sourceLatitude) ??
+          toFiniteNumber(properties.targetLatitude);
         mapCoordinates = "drone";
       }
 
@@ -492,19 +517,30 @@ export function Map({
   onTogglePlumeView,
   onPlumeViewAutoChange,
   onTraceRenderComplete,
+  startPointFilterEnabled = false,
+  onToggleStartPointFilter,
+  startPointFilterRadiusMeters = 25,
+  onStartPointFilterRadiusChange,
+  startPointPickModeEnabled = false,
+  onStartPointPickModeChange,
+  startPointCoordinates = null,
+  onSetStartPointCoordinates,
+  onClearStartPointCoordinates,
 }) {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const popupRef = useRef(null);
   const primaryMarkerRef = useRef(null);
+  const startPointMarkerRef = useRef(null);
   const plumeTransitionFrameRef = useRef(null);
   const traceSourceUpdateTimeoutRef = useRef(null);
   const plumeModeFromTiltRef = useRef(plumeViewEnabled);
   const onPlumeViewAutoChangeRef = useRef(onPlumeViewAutoChange);
   const resolvedTraceDataset = useMemo(
-    () => (Array.isArray(tracePoints) && tracePoints.length > 0
-      ? buildTraceDatasetFromTracePoints(tracePoints)
-      : traceDataset),
+    () =>
+      Array.isArray(tracePoints) && tracePoints.length > 0
+        ? buildTraceDatasetFromTracePoints(tracePoints)
+        : traceDataset,
     [traceDataset, tracePoints],
   );
   const initialTraceDatasetRef = useRef(resolvedTraceDataset);
@@ -570,11 +606,11 @@ export function Map({
       resultsPageMode
         ? buildTraceFlightPathFeatureCollection(resolvedTraceDataset)
         : buildLiveFlightPathFeatureCollection(
-          droneTrackHistory,
-          selectedDroneId,
-          visibleDroneIdSet,
-          hasVisibilityFilter,
-        ),
+            droneTrackHistory,
+            selectedDroneId,
+            visibleDroneIdSet,
+            hasVisibilityFilter,
+          ),
     [
       droneTrackHistory,
       hasVisibilityFilter,
@@ -703,9 +739,9 @@ export function Map({
       style: isOnlineMode
         ? "mapbox://styles/mapbox/satellite-streets-v12"
         : buildOfflineSatelliteStyle({
-          imageUrl: satelliteImage,
-          coordinates: offlineCoordinates,
-        }),
+            imageUrl: satelliteImage,
+            coordinates: offlineCoordinates,
+          }),
       center: [initialCenterLongitude, initialCenterLatitude],
       zoom: 18,
       pitch: 0,
@@ -722,8 +758,6 @@ export function Map({
     });
 
     map.addControl(new mapboxgl.NavigationControl(), "top-right");
-
-
 
     map.on("load", () => {
       if (!isOnlineMode && !resultsPageMode) {
@@ -1024,16 +1058,18 @@ export function Map({
                             <div style="min-width: 148px; color: #e5eef8;">
                                 <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: #9fb0c2;">Sample ${sampleIndex}</div>
                                 <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">${displayMetricLabel || (isAerisTrace ? "CH4" : "Purway")} ${Number(methane ?? 0).toFixed(2)} ${displayMetricUnits || (isAerisTrace ? "ppm" : "ppm-m")}</div>
-                                ${isAerisTrace
-                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
-                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
-              }
-                                ${isAerisTrace
-                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${Number(acetylene ?? 0).toFixed(2)} ppm</div>
+                                ${
+                                  isAerisTrace
+                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
+                                    : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
+                                }
+                                ${
+                                  isAerisTrace
+                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${Number(acetylene ?? 0).toFixed(2)} ppm</div>
                                 <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Nitrous Oxide ${Number(nitrousOxide ?? 0).toFixed(2)} ppm</div>`
-                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
+                                    : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
                                   <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${Number(purway ?? 0).toFixed(2)} ppm-m</div>`
-              }
+                                }
                                 <div style="margin-top: 4px; font-size: 12px; color: #d2dce8;">Altitude ${Number(pointAltitude).toFixed(0)} m</div>
                                 <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">Flight mark ${timeLabel}</div>
                             </div>
@@ -1084,12 +1120,13 @@ export function Map({
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Battery ${battery ?? "-"}%</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Speed ${speed ?? "-"} m/s</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${methane ?? "-"} ppm</div>
-                            ${isAerisDrone
-              ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${acetylene ?? "-"} ppm</div>
+                            ${
+                              isAerisDrone
+                                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${acetylene ?? "-"} ppm</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Nitrous Oxide ${nitrousOxide ?? "-"} ppm</div>`
-              : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? "-"} ppm-m</div>
+                                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? "-"} ppm-m</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${sniffer ?? "-"} ppm</div>`
-            }
+                            }
                             <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">${ts ? new Date(ts).toLocaleString() : ""}</div>
                         </div>
                     `,
@@ -1149,10 +1186,102 @@ export function Map({
       popupRef.current = null;
       primaryMarkerRef.current?.remove();
       primaryMarkerRef.current = null;
+      startPointMarkerRef.current?.remove();
+      startPointMarkerRef.current = null;
       map.remove();
       mapRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const currentMap = mapRef.current;
+
+    if (!currentMap) {
+      return;
+    }
+
+    const handleMapClick = (event) => {
+      if (!startPointPickModeEnabled) {
+        return;
+      }
+
+      const latitude = Number(event?.lngLat?.lat);
+      const longitude = Number(event?.lngLat?.lng);
+
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return;
+      }
+
+      onSetStartPointCoordinates?.({ latitude, longitude });
+      onStartPointPickModeChange?.(false);
+    };
+
+    currentMap.on("click", handleMapClick);
+
+    return () => {
+      currentMap.off("click", handleMapClick);
+    };
+  }, [
+    onSetStartPointCoordinates,
+    onStartPointPickModeChange,
+    startPointPickModeEnabled,
+  ]);
+
+  useEffect(() => {
+    const currentMap = mapRef.current;
+    const canvas = currentMap?.getCanvas?.();
+
+    if (!canvas) {
+      return;
+    }
+
+    if (startPointPickModeEnabled) {
+      canvas.style.cursor = "crosshair";
+      return () => {
+        canvas.style.cursor = "";
+      };
+    }
+
+    return undefined;
+  }, [startPointPickModeEnabled]);
+
+  useEffect(() => {
+    const currentMap = mapRef.current;
+
+    if (!currentMap) {
+      return;
+    }
+
+    if (
+      !startPointCoordinates ||
+      !Number.isFinite(startPointCoordinates.latitude) ||
+      !Number.isFinite(startPointCoordinates.longitude)
+    ) {
+      startPointMarkerRef.current?.remove();
+      startPointMarkerRef.current = null;
+      return;
+    }
+
+    const nextLongitude = Number(startPointCoordinates.longitude);
+    const nextLatitude = Number(startPointCoordinates.latitude);
+
+    if (!startPointMarkerRef.current) {
+      startPointMarkerRef.current = new mapboxgl.Marker({
+        color: "#06b6d4",
+        scale: 0.9,
+      })
+        .setLngLat([nextLongitude, nextLatitude])
+        .setPopup(
+          new mapboxgl.Popup({ offset: 14 }).setHTML(
+            '<div style="font-size:12px;color:#0f172a;font-weight:600;">Start Point Filter</div>',
+          ),
+        )
+        .addTo(currentMap);
+      return;
+    }
+
+    startPointMarkerRef.current.setLngLat([nextLongitude, nextLatitude]);
+  }, [startPointCoordinates]);
 
   useEffect(() => {
     if (resultsPageMode) {
@@ -1319,7 +1448,7 @@ export function Map({
 
     const startHeatmapOpacity = Number(
       currentMap.getPaintProperty("methane-trace-heatmap", "heatmap-opacity") ??
-      0,
+        0,
     );
     const startZeroOpacity = Number(
       currentMap.getPaintProperty(
@@ -1335,7 +1464,7 @@ export function Map({
     );
     const startHotspotOpacity = Number(
       currentMap.getPaintProperty("methane-trace-hotspots", "circle-opacity") ??
-      0.8,
+        0.8,
     );
     const startHotspotStrokeOpacity = Number(
       currentMap.getPaintProperty(
@@ -1345,7 +1474,7 @@ export function Map({
     );
     const startHaloOpacity = Number(
       currentMap.getPaintProperty("methane-trace-halo", "circle-opacity") ??
-      0.36,
+        0.36,
     );
 
     const targetHeatmapOpacity = resultsPageMode
@@ -1404,7 +1533,7 @@ export function Map({
         "methane-trace-heatmap",
         "heatmap-opacity",
         startHeatmapOpacity +
-        (targetHeatmapOpacity - startHeatmapOpacity) * eased,
+          (targetHeatmapOpacity - startHeatmapOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-zero-points",
@@ -1415,19 +1544,19 @@ export function Map({
         "methane-trace-zero-points",
         "circle-stroke-opacity",
         startZeroStrokeOpacity +
-        (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
+          (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-opacity",
         startHotspotOpacity +
-        (targetHotspotOpacity - startHotspotOpacity) * eased,
+          (targetHotspotOpacity - startHotspotOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-stroke-opacity",
         startHotspotStrokeOpacity +
-        (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
+          (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-halo",
@@ -1443,7 +1572,7 @@ export function Map({
         "methane-plume-caps",
         "line-opacity",
         startPlumeCapsOpacity +
-        (targetPlumeCapsOpacity - startPlumeCapsOpacity) * eased,
+          (targetPlumeCapsOpacity - startPlumeCapsOpacity) * eased,
       );
 
       if (progress < 1) {
@@ -1502,12 +1631,7 @@ export function Map({
     if (flightPathSource) {
       flightPathSource.setData(flightPathDataset);
     }
-  }, [
-    droneStates,
-    flightPathDataset,
-    hasVisibilityFilter,
-    visibleDroneIdSet,
-  ]);
+  }, [droneStates, flightPathDataset, hasVisibilityFilter, visibleDroneIdSet]);
 
   useEffect(() => {
     const currentMap = mapRef.current;
@@ -1535,8 +1659,10 @@ export function Map({
 
       if (Number.isFinite(nextLatitude) && Number.isFinite(nextLongitude)) {
         setDroneTrackHistory((previousHistory) => {
-          const existingCoordinates = previousHistory[normalizedEntry.drone_id] || [];
-          const lastCoordinate = existingCoordinates[existingCoordinates.length - 1];
+          const existingCoordinates =
+            previousHistory[normalizedEntry.drone_id] || [];
+          const lastCoordinate =
+            existingCoordinates[existingCoordinates.length - 1];
 
           if (
             lastCoordinate &&
@@ -1599,7 +1725,9 @@ export function Map({
             return history;
           }, {}),
         );
-      } catch { /* empty */ }
+      } catch {
+        /* empty */
+      }
     };
 
     const connectTelemetrySocket = () => {
@@ -1739,14 +1867,14 @@ export function Map({
     >
       <div className="flex h-full w-full flex-col gap-3">
         <div
-          className={`grid grid-cols-1 gap-3 xl:items-start ${resultsPageMode
-            ? "xl:grid-cols-1"
-            : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
-            }`}
+          className={`grid grid-cols-1 gap-3 xl:items-start ${
+            resultsPageMode
+              ? "xl:grid-cols-1"
+              : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
+          }`}
         >
           {!resultsPageMode ? (
-            <div className="flex flex-col gap-3 rounded-lg px-3 py-2"
-            >
+            <div className="flex flex-col gap-3 rounded-lg px-3 py-2">
               <div className="flex flex-col justify-start items-start">
                 <p
                   className="text-xs uppercase tracking-[0.18em]"
@@ -1777,7 +1905,10 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${isAutoCenterEnabled ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Center on Drone
                     </span>
                   </div>
@@ -1795,7 +1926,10 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showFlightPath ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Flight Path
                     </span>
                   </div>
@@ -1806,14 +1940,19 @@ export function Map({
                   >
                     <button
                       type="button"
-                      onClick={() => setShowTargetMarkers((previous) => !previous)}
+                      onClick={() =>
+                        setShowTargetMarkers((previous) => !previous)
+                      }
                       className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showTargetMarkers ? "bg-yellow-400" : "bg-gray-300"}`}
                     >
                       <span
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showTargetMarkers ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Target Markers
                     </span>
                   </div>
@@ -1830,18 +1969,23 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${plumeViewEnabled ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Plume View
                     </span>
                   </div>
                 </div>
-                
-
               </div>
             </div>
           ) : null}
-          <div className="flex flex-col gap-2 rounded-lg border px-3 py-2 mt-5 "
-            style={{ backgroundColor: color.surface, borderColor: color.border }}
+          <div
+            className="flex flex-col gap-2 rounded-lg border px-3 py-2 mt-5 "
+            style={{
+              backgroundColor: color.surface,
+              borderColor: color.border,
+            }}
           >
             {!resultsPageMode ? (
               <div className="flex flex-col gap-2">
@@ -1861,7 +2005,10 @@ export function Map({
                       className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showAllPlottedData ? "translate-x-5" : "translate-x-0"}`}
                     />
                   </button>
-                  <span className="text-sm font-semibold" style={{ color: color.text }}>
+                  <span
+                    className="text-sm font-semibold"
+                    style={{ color: color.text }}
+                  >
                     Map Data
                   </span>
 
@@ -1958,12 +2105,93 @@ export function Map({
                   >
                     No Data (0)
                   </button>
+                </div>
 
+                <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    className="flex items-center gap-2 rounded-full border px-2 py-1"
+                    style={{ borderColor: color.border }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onToggleStartPointFilter?.()}
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${startPointFilterEnabled ? "bg-cyan-500" : "bg-gray-300"}`}
+                    >
+                      <span
+                        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${startPointFilterEnabled ? "translate-x-5" : "translate-x-0"}`}
+                      />
+                    </button>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
+                      Start Radius Filter
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onStartPointPickModeChange?.(!startPointPickModeEnabled)
+                    }
+                    className="rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                    style={{
+                      backgroundColor: startPointPickModeEnabled
+                        ? `${color.orange}22`
+                        : color.card,
+                      borderColor: startPointPickModeEnabled
+                        ? color.orange
+                        : color.border,
+                      color: startPointPickModeEnabled
+                        ? color.text
+                        : color.textMuted,
+                    }}
+                  >
+                    {startPointPickModeEnabled
+                      ? "Click on Map..."
+                      : "Set Start"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onClearStartPointCoordinates?.()}
+                    disabled={!startPointCoordinates}
+                    className="rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-55"
+                    style={{
+                      backgroundColor: color.card,
+                      borderColor: color.border,
+                      color: color.textMuted,
+                    }}
+                  >
+                    Clear Start
+                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="text-xs"
+                      style={{ color: color.textMuted }}
+                    >
+                      Radius {Math.round(startPointFilterRadiusMeters)} m
+                    </span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={20}
+                      step={1}
+                      value={startPointFilterRadiusMeters}
+                      onChange={(event) =>
+                        onStartPointFilterRadiusChange?.(
+                          Number(event.target.value) || 25,
+                        )
+                      }
+                      className="w-28"
+                    />
+                  </div>
                 </div>
               </div>
             ) : null}
 
-            <div className="flex w-full flex-col gap-2 pt-1">
+            <div className="flex w-full flex-col gap-2 pt-1 ">
               {resultsPageMode ? (
                 <div className="flex flex-wrap items-center gap-3">
                   <div
@@ -1979,7 +2207,10 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${heatmapEnabled ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Heatmap
                     </span>
                   </div>
@@ -1997,7 +2228,10 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${plumeViewEnabled ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Plume View
                     </span>
                   </div>
@@ -2006,7 +2240,10 @@ export function Map({
                     className="flex items-center gap-2 rounded-full border px-2 py-1"
                     style={{ borderColor: color.border }}
                   >
-                    <span className="text-xs" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-xs"
+                      style={{ color: color.textMuted }}
+                    >
                       Methane Valid
                     </span>
                     <button
@@ -2064,6 +2301,87 @@ export function Map({
                       0
                     </button>
                   </div>
+                  <div className="flex w-full flex-row gap-3">
+                    <div
+                      className="flex items-center gap-2 rounded-full border px-2 py-1"
+                      style={{ borderColor: color.border }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onToggleStartPointFilter?.()}
+                        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${startPointFilterEnabled ? "bg-cyan-500" : "bg-gray-300"}`}
+                      >
+                        <span
+                          className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${startPointFilterEnabled ? "translate-x-5" : "translate-x-0"}`}
+                        />
+                      </button>
+                      <span
+                        className="text-sm"
+                        style={{ color: color.textMuted }}
+                      >
+                        Start Radius
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onStartPointPickModeChange?.(!startPointPickModeEnabled)
+                      }
+                      className="rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors"
+                      style={{
+                        backgroundColor: startPointPickModeEnabled
+                          ? `${color.orange}22`
+                          : color.card,
+                        borderColor: startPointPickModeEnabled
+                          ? color.orange
+                          : color.border,
+                        color: startPointPickModeEnabled
+                          ? color.text
+                          : color.textMuted,
+                      }}
+                    >
+                      {startPointPickModeEnabled
+                        ? "Click on Map..."
+                        : "Set Start"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onClearStartPointCoordinates?.()}
+                      disabled={!startPointCoordinates}
+                      className="rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-55"
+                      style={{
+                        backgroundColor: color.card,
+                        borderColor: color.border,
+                        color: color.textMuted,
+                      }}
+                    >
+                      Clear Start
+                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="text-xs"
+                        style={{ color: color.textMuted }}
+                      >
+                        Radius {Math.round(startPointFilterRadiusMeters)} m
+                      </span>
+                      <input
+                        type="range"
+                        min={1}
+                        max={20}
+                        step={1}
+                        value={startPointFilterRadiusMeters}
+                        onChange={(event) =>
+                          onStartPointFilterRadiusChange?.(
+                            Number(event.target.value) || 25,
+                          )
+                        }
+                        className="w-28"
+                      />
+                    </div>
+                  </div>
                 </div>
               ) : null}
 
@@ -2084,7 +2402,10 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${isAutoCenterEnabled ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Auto Center
                     </span>
                   </div>
@@ -2102,7 +2423,10 @@ export function Map({
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showFlightPath ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Flight Path
                     </span>
                   </div>
@@ -2113,14 +2437,19 @@ export function Map({
                   >
                     <button
                       type="button"
-                      onClick={() => setShowTargetMarkers((previous) => !previous)}
+                      onClick={() =>
+                        setShowTargetMarkers((previous) => !previous)
+                      }
                       className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none ${showTargetMarkers ? "bg-yellow-400" : "bg-gray-300"}`}
                     >
                       <span
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform duration-300 ease-in-out ${showTargetMarkers ? "translate-x-5" : "translate-x-0"}`}
                       />
                     </button>
-                    <span className="text-sm" style={{ color: color.textMuted }}>
+                    <span
+                      className="text-sm"
+                      style={{ color: color.textMuted }}
+                    >
                       Target Markers
                     </span>
                   </div>

@@ -1,5 +1,113 @@
 import { extractTelemetryMetrics, SENSOR_MODE_AERIS, toFiniteNumber } from "../constants/telemetryMetrics";
 
+const START_POINT_FILTER_RADIUS_METERS = 6;
+const START_POINT_FILTER_MAX_PREFIX_POINTS = 10000;
+
+const degreesToRadians = (value) => (value * Math.PI) / 180;
+
+const calculateDistanceMeters = (latitudeA, longitudeA, latitudeB, longitudeB) => {
+  const earthRadiusMeters = 6371000;
+  const latA = degreesToRadians(latitudeA);
+  const latB = degreesToRadians(latitudeB);
+  const latDelta = degreesToRadians(latitudeB - latitudeA);
+  const lonDelta = degreesToRadians(longitudeB - longitudeA);
+
+  const haversine =
+    Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
+    Math.cos(latA) * Math.cos(latB) * Math.sin(lonDelta / 2) * Math.sin(lonDelta / 2);
+
+  const angularDistance = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+  return earthRadiusMeters * angularDistance;
+};
+
+const filterStartupPointsByDrone = (points) => {
+  const rows = Array.isArray(points) ? points : [];
+
+  if (rows.length <= 1) {
+    return rows;
+  }
+
+  const groupedByDrone = new globalThis.Map();
+
+  rows.forEach((point) => {
+    const droneId = String(point?.droneId || "unknown").trim() || "unknown";
+    const existingGroup = groupedByDrone.get(droneId);
+
+    if (existingGroup) {
+      existingGroup.push(point);
+      return;
+    }
+
+    groupedByDrone.set(droneId, [point]);
+  });
+
+  const filtered = [];
+
+  groupedByDrone.forEach((dronePoints) => {
+    if (dronePoints.length <= 1) {
+      filtered.push(...dronePoints);
+      return;
+    }
+
+    const firstPoint = dronePoints[0];
+    const startLatitude = Number(firstPoint?.latitude);
+    const startLongitude = Number(firstPoint?.longitude);
+
+    if (!Number.isFinite(startLatitude) || !Number.isFinite(startLongitude)) {
+      filtered.push(...dronePoints);
+      return;
+    }
+
+    const keptPoints = [];
+    let droppedPrefixCount = 0;
+    let startupWindowOpen = true;
+
+    dronePoints.forEach((point, index) => {
+      const latitude = Number(point?.latitude);
+      const longitude = Number(point?.longitude);
+
+      if (!startupWindowOpen) {
+        keptPoints.push(point);
+        return;
+      }
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        droppedPrefixCount >= START_POINT_FILTER_MAX_PREFIX_POINTS
+      ) {
+        startupWindowOpen = false;
+        keptPoints.push(point);
+        return;
+      }
+
+      const distanceFromStartMeters = calculateDistanceMeters(
+        startLatitude,
+        startLongitude,
+        latitude,
+        longitude,
+      );
+
+      if (index > 0 && distanceFromStartMeters <= START_POINT_FILTER_RADIUS_METERS) {
+        droppedPrefixCount += 1;
+        return;
+      }
+
+      startupWindowOpen = false;
+      keptPoints.push(point);
+    });
+
+    if (keptPoints.length === 0) {
+      filtered.push(firstPoint);
+      return;
+    }
+
+    filtered.push(...keptPoints);
+  });
+
+  return filtered;
+};
+
 const getTraceDisplayMetric = (point) => {
   if (point.sensorMode === SENSOR_MODE_AERIS) {
     const aerisCandidates = [
@@ -63,7 +171,7 @@ const metersToLongitudeDegrees = (meters, atLatitude) =>
   meters / (111320 * Math.cos((atLatitude * Math.PI) / 180));
 
 export const buildDeckTracePointsFromFlowData = (datasetFlowData) => {
-  const points = Array.isArray(datasetFlowData) ? datasetFlowData : [];
+  const points = filterStartupPointsByDrone(datasetFlowData);
 
   return points
     .filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude))
