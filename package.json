@@ -8,8 +8,11 @@
   "scripts": {
     "dev:web": "npm --prefix app run dev",
     "dev:electron": "wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "dev:electron:optimized": "wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 NODE_OPTIONS=\"--max-old-space-size=4096 --max-semi-space-size=128 --heapsnapshot-near-heap-limit=2 --expose-gc\" electron .",
     "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:electron\"",
+    "dev:optimized": "concurrently -k \"npm:dev:web\" \"npm:dev:electron:optimized\"",
     "start": "npm run build:web && electron .",
+    "start:optimized": "npm run build:web && cross-env NODE_OPTIONS=\"--max-old-space-size=4096 --max-semi-space-size=128 --heapsnapshot-near-heap-limit=2 --expose-gc\" electron .",
     "build:web": "npm --prefix app run build",
     "build": "npm run build:web && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
     "dist": "npm run build",

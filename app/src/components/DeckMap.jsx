@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import { MapboxOverlay } from "@deck.gl/mapbox";
-import { GeoJsonLayer, PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { ColumnLayer, PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 import { HeatmapLayer } from "@deck.gl/aggregation-layers";
 import satelliteImage from "../assets/satellite.png";
 import { tw, color } from "../constants/tailwind";
@@ -31,13 +31,16 @@ import {
     extractTelemetryMetrics,
     SENSOR_MODE_AERIS,
 } from "../constants/telemetryMetrics";
-import { traceOrigin, buildMethanePlumeDataset } from "../data/methaneTraceData";
+import { traceOrigin } from "../data/methaneTraceData";
 import { buildDeckTracePointsFromFlowData } from "../shared/deckTraceData";
 
 const latitude = traceOrigin.latitude;
 const longitude = traceOrigin.longitude;
 const altitude = traceOrigin.altitude;
 const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
+const TRACE_HIGH_ZOOM_THRESHOLD = 14;
+const TRACE_MEDIUM_ZOOM_THRESHOLD = 11;
+const TRACE_LOW_ZOOM_THRESHOLD = 8;
 
 const DRONE_COLOR_BY_ID = {
     M350: "#f97316",
@@ -268,6 +271,133 @@ const getTraceMaxMethane = (dataset) => {
     return max;
 };
 
+const buildPlumeColumnData = (tracePoints) => (Array.isArray(tracePoints) ? tracePoints : [])
+    .filter((point) => Number(point?.methane ?? 0) > 0)
+    .filter((point) => Number.isFinite(point?.longitude) && Number.isFinite(point?.latitude))
+    .map((point, index) => ({
+        id: `plume-${index}`,
+        longitude: Number(point.longitude),
+        latitude: Number(point.latitude),
+        methane: Number(point.methane ?? 0),
+        plumeHeight: Math.max(0, Number(point.methane ?? 0) * 0.01),
+        radiusMeters: 1,
+    }));
+
+const getTracePointBudgetForZoom = (zoomLevel) => {
+    if (zoomLevel >= 16) {
+        return 120000;
+    }
+
+    if (zoomLevel >= TRACE_HIGH_ZOOM_THRESHOLD) {
+        return 90000;
+    }
+
+    if (zoomLevel >= TRACE_MEDIUM_ZOOM_THRESHOLD) {
+        return 50000;
+    }
+
+    if (zoomLevel >= TRACE_LOW_ZOOM_THRESHOLD) {
+        return 22000;
+    }
+
+    return 12000;
+};
+
+const getGridCellSizeForZoom = (zoomLevel) => {
+    if (zoomLevel >= TRACE_HIGH_ZOOM_THRESHOLD) {
+        return 0;
+    }
+
+    if (zoomLevel >= TRACE_MEDIUM_ZOOM_THRESHOLD) {
+        return 0.00015;
+    }
+
+    if (zoomLevel >= TRACE_LOW_ZOOM_THRESHOLD) {
+        return 0.00035;
+    }
+
+    return 0.00075;
+};
+
+const decimateTracePoints = (points, maxPoints) => {
+    if (!Array.isArray(points) || points.length <= maxPoints) {
+        return Array.isArray(points) ? points : [];
+    }
+
+    const stride = Math.max(1, Math.ceil(points.length / maxPoints));
+    const reduced = [];
+
+    for (let index = 0; index < points.length; index += stride) {
+        reduced.push(points[index]);
+    }
+
+    if (reduced[reduced.length - 1] !== points[points.length - 1]) {
+        reduced.push(points[points.length - 1]);
+    }
+
+    return reduced.slice(0, maxPoints);
+};
+
+const aggregateTracePointsByGrid = (points, cellSize) => {
+    if (!Array.isArray(points) || points.length === 0 || cellSize <= 0) {
+        return Array.isArray(points) ? points : [];
+    }
+
+    const buckets = new globalThis.Map();
+
+    points.forEach((point) => {
+        const longitude = Number(point?.longitude);
+        const latitude = Number(point?.latitude);
+
+        if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+            return;
+        }
+
+        const lngKey = Math.floor(longitude / cellSize);
+        const latKey = Math.floor(latitude / cellSize);
+        const bucketKey = `${lngKey}:${latKey}`;
+        const methane = Number(point?.methane ?? 0);
+        const existing = buckets.get(bucketKey);
+
+        if (!existing) {
+            buckets.set(bucketKey, {
+                representative: point,
+                methaneMax: methane,
+                methaneSum: methane,
+                pointCount: 1,
+            });
+            return;
+        }
+
+        existing.pointCount += 1;
+        existing.methaneSum += methane;
+
+        if (methane > existing.methaneMax) {
+            existing.methaneMax = methane;
+            existing.representative = point;
+        }
+    });
+
+    return [...buckets.values()].map((entry) => ({
+        ...entry.representative,
+        methane: entry.methaneMax,
+        methaneAvg: entry.methaneSum / entry.pointCount,
+        aggregatedCount: entry.pointCount,
+    }));
+};
+
+const buildAdaptiveTracePointData = (points, zoomLevel) => {
+    const rows = Array.isArray(points) ? points : [];
+    if (!rows.length) {
+        return [];
+    }
+
+    const maxPoints = getTracePointBudgetForZoom(zoomLevel);
+    const cellSize = getGridCellSizeForZoom(zoomLevel);
+    const clustered = cellSize > 0 ? aggregateTracePointsByGrid(rows, cellSize) : rows;
+    return decimateTracePoints(clustered, maxPoints);
+};
+
 const fitMapToDroneStates = (map, drones, { padding = 60, duration = 700, maxZoom = 17 } = {}) => {
     if (!map || !Array.isArray(drones) || drones.length === 0) {
         return false;
@@ -346,6 +476,7 @@ export function DeckMap({
     const [droneStates, setDroneStates] = useState([]);
     const [, setDroneTrackHistory] = useState({});
     const [isTelemetryConnected, setIsTelemetryConnected] = useState(false);
+    const [mapZoom, setMapZoom] = useState(18);
 
     const safeTraceOpacity = Math.min(
         1,
@@ -369,9 +500,13 @@ export function DeckMap({
         ),
         [hasVisibilityFilter, showTargetMarkers, traceDataset, tracePoints, visibleDroneIdSet],
     );
+    const adaptiveTracePointData = useMemo(
+        () => buildAdaptiveTracePointData(tracePointData, mapZoom),
+        [mapZoom, tracePointData],
+    );
     const methanePlumeDataset = useMemo(
-        () => (resultsPageMode ? buildMethanePlumeDataset(traceDataset) : EMPTY_FEATURE_COLLECTION),
-        [resultsPageMode, traceDataset],
+        () => (resultsPageMode ? buildPlumeColumnData(adaptiveTracePointData) : []),
+        [adaptiveTracePointData, resultsPageMode],
     );
 
     const focusedDrone =
@@ -511,8 +646,20 @@ export function DeckMap({
     }, [lowerLimit, upperLimit]);
 
     const deckLayers = useMemo(() => {
-        const traceFeatures = tracePointData || [];
-        const plumeFeatures = methanePlumeDataset?.features || [];
+        const traceFeatures = adaptiveTracePointData || [];
+        const traceZeroFeatures = [];
+        const traceHotspotFeatures = [];
+
+        traceFeatures.forEach((point) => {
+            if (Number(point?.methane ?? 0) > 0) {
+                traceHotspotFeatures.push(point);
+                return;
+            }
+
+            traceZeroFeatures.push(point);
+        });
+
+        const plumeFeatures = methanePlumeDataset || [];
         const liveDroneFeatures = buildDroneFeatureCollection(
             visibleDroneStates,
             visibleDroneIdSet,
@@ -564,7 +711,7 @@ export function DeckMap({
             // }),
             new ScatterplotLayer({
                 id: "methane-trace-zero-points",
-                data: traceFeatures.filter((point) => Number(point?.methane ?? 0) === 0),
+                data: traceZeroFeatures,
                 pickable: traceFeatures.length <= 25000,
                 visible: zeroOpacity > 0,
                 getPosition: (point) => [point.longitude, point.latitude],
@@ -579,7 +726,7 @@ export function DeckMap({
             }),
             new ScatterplotLayer({
                 id: "methane-trace-hotspots",
-                data: traceFeatures.filter((point) => Number(point?.methane ?? 0) > 0),
+                data: traceHotspotFeatures,
                 pickable: traceFeatures.length <= 25000,
                 visible: hotspotOpacity > 0,
                 getPosition: (point) => [point.longitude, point.latitude],
@@ -599,7 +746,7 @@ export function DeckMap({
             }),
             new ScatterplotLayer({
                 id: "methane-trace-halo",
-                data: traceFeatures.filter((point) => Number(point?.methane ?? 0) > 0),
+                data: traceHotspotFeatures,
                 pickable: false,
                 visible: haloOpacity > 0,
                 getPosition: (point) => [point.longitude, point.latitude],
@@ -615,26 +762,30 @@ export function DeckMap({
                 stroked: false,
                 opacity: haloOpacity,
             }),
-            new GeoJsonLayer({
+            new ColumnLayer({
                 id: "methane-plume-columns",
                 data: plumeFeatures,
                 pickable: false,
-                filled: true,
+                diskResolution: 8,
                 stroked: false,
                 extruded: true,
-                wireframe: false,
-                getFillColor: (feature) => hexToRgba(getScaleColor(feature?.properties?.methane), 210),
-                getElevation: (feature) => Number(feature?.properties?.plumeHeight ?? 0),
+                getPosition: (feature) => [feature.longitude, feature.latitude],
+                getRadius: (feature) => Number(feature?.radiusMeters ?? 1),
+                radiusUnits: "meters",
+                getFillColor: (feature) => hexToRgba(getScaleColor(feature?.methane), 210),
+                getElevation: (feature) => Number(feature?.plumeHeight ?? 0),
                 elevationScale: 14,
                 opacity: plumeOpacity,
             }),
-            new GeoJsonLayer({
+            new ScatterplotLayer({
                 id: "methane-plume-caps",
                 data: plumeFeatures,
                 pickable: false,
                 filled: false,
                 stroked: true,
-                wireframe: false,
+                getPosition: (feature) => [feature.longitude, feature.latitude],
+                getRadius: (feature) => Number(feature?.radiusMeters ?? 1),
+                radiusUnits: "meters",
                 lineWidthMinPixels: 1.1,
                 getLineColor: [255, 255, 255, 220],
                 opacity: plumeCapsOpacity,
@@ -690,10 +841,10 @@ export function DeckMap({
         plumeViewEnabled,
         resultsPageMode,
         safeTraceOpacity,
+        adaptiveTracePointData,
         upperLimit,
         visibleDroneIdSet,
         visibleDroneStates,
-        tracePointData,
     ]);
 
     const initialDeckLayersRef = useRef(null);
@@ -854,6 +1005,26 @@ export function DeckMap({
     useEffect(() => {
         deckOverlayRef.current?.setProps({ layers: deckLayers });
     }, [deckLayers]);
+
+    useEffect(() => {
+        const currentMap = mapRef.current;
+        if (!currentMap) {
+            return undefined;
+        }
+
+        const syncZoom = () => {
+            const nextZoom = Number(currentMap.getZoom());
+            if (Number.isFinite(nextZoom)) {
+                setMapZoom(nextZoom);
+            }
+        };
+
+        syncZoom();
+        currentMap.on("zoomend", syncZoom);
+        return () => {
+            currentMap.off("zoomend", syncZoom);
+        };
+    }, []);
 
     useEffect(() => {
         const currentMap = mapRef.current;
@@ -1125,7 +1296,7 @@ export function DeckMap({
 
     useEffect(() => {
         onTraceRenderComplete?.();
-    }, [tracePointData, deckLayers, onTraceRenderComplete]);
+    }, [adaptiveTracePointData, deckLayers, onTraceRenderComplete]);
 
     //   return (
     //     <div className={tw.panel} style={{ backgroundColor: color.card, padding: "0.5rem" }}>

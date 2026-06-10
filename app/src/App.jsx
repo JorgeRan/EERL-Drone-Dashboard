@@ -7,32 +7,31 @@ import { tw, color } from "./constants/tailwind";
 import { DeviceTabs } from "./components/Tabs";
 import { MethanePanel } from "./components/MethanePanel";
 import { AerisPanel } from "./components/AerisPanel";
-import { Map } from "./components/Map";
 import { WindPanel } from "./components/WindPanel";
 import { DataPage } from "./components/DataPage";
 import { ResultsPage } from "./components/ResultsPage";
 import { MeasurementControls } from "./components/MeasurementControls";
 import { MissionModal } from "./components/MissionModal";
 import {DeckMap} from "./components/DeckMap";
+import { Map } from "./components/Map";
 import { buildDeckTracePointsFromFlowData } from "./shared/deckTraceData";
-import { DASHBOARD_CHART_POINT_LIMIT, limitSeriesToTail } from "./shared/chartSeries";
-import {
-  flowChartData,
-} from "./data/methaneTraceData";
+// import {
+//   flowChartData,
+// } from "./data/methaneTraceData";
 import {
   calculateDistanceMeters,
   extractTelemetryMetrics,
-  getTelemetryPeakValue,
   inferFlowSensorMode,
   SENSOR_MODE_AERIS,
   toFiniteNumber,
 } from "./constants/telemetryMetrics";
-import { normalizeTelemetryPacket } from "./shared/telemetryContract";
 import logoSvg from "./assets/EERL_logo_black.svg";
 import {
   backendHttpUrl,
-  createTelemetryWebSocket,
+  backendWsBaseUrl,
   getMeasurementStatus,
+  pauseMeasurement,
+  resumeMeasurement,
   saveMission,
   syncAndPullData,
   startMeasurement,
@@ -78,11 +77,6 @@ const devices = [
     status: "online",
   },
 ];
-
-const fallbackMaxSelectablePpm = Math.max(
-  1,
-  ...flowChartData.map((point) => getTelemetryPeakValue([point])),
-);
 
 const REQUIRED_FLIGHT_STATUS = 2;
 
@@ -292,84 +286,144 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
   };
 };
 
-const appendFlowPoints = (series, telemetryRows, options = {}) => {
+// const appendFlowPoints = (series, telemetryRows, options = {}) => {
+//   const existingSeries = series || [];
+//   const rows = Array.isArray(telemetryRows) ? telemetryRows : [];
+//   const maxPoints = Number.isFinite(options.maxPoints)
+//     ? Math.max(0, options.maxPoints)
+//     : null;
+
+//   if (rows.length === 0) {
+//     return existingSeries;
+//   }
+
+//   let changed = false;
+//   let nextSeries = existingSeries;
+
+//   const insertAtTimestamp = (nextTimestampMs, telemetryRow) => {
+//     let low = 0;
+//     let high = nextSeries.length;
+
+//     while (low < high) {
+//       const midpoint = Math.floor((low + high) / 2);
+//       if (nextSeries[midpoint].timestampMs <= nextTimestampMs) {
+//         low = midpoint + 1;
+//       } else {
+//         high = midpoint;
+//       }
+//     }
+
+//     const insertionIndex = low;
+//     nextSeries.splice(
+//       insertionIndex,
+//       0,
+//       buildFlowPointFromTelemetry(telemetryRow, insertionIndex),
+//     );
+
+//     for (let index = insertionIndex + 1; index < nextSeries.length; index += 1) {
+//       const point = nextSeries[index];
+//       nextSeries[index] = {
+//         ...point,
+//         sampleOrder: index,
+//         sampleIndex: index + 1,
+//       };
+//     }
+//   };
+
+//   rows.forEach((telemetryRow) => {
+//     if (!shouldDisplayTelemetry(telemetryRow)) {
+//       return;
+//     }
+
+//     if (!changed) {
+//       nextSeries = existingSeries.slice();
+//       changed = true;
+//     }
+
+//     const nextTimestampMs = new Date(telemetryRow.ts || Date.now()).getTime();
+//     const lastPoint = nextSeries[nextSeries.length - 1] || null;
+
+//     if (!lastPoint || nextTimestampMs >= lastPoint.timestampMs) {
+//       nextSeries.push(buildFlowPointFromTelemetry(telemetryRow, nextSeries.length));
+//       return;
+//     }
+
+//     insertAtTimestamp(nextTimestampMs, telemetryRow);
+//   });
+
+//   if (!changed) {
+//     return existingSeries;
+//   }
+
+//   if (maxPoints !== null && nextSeries.length > maxPoints) {
+//     nextSeries = nextSeries.slice(nextSeries.length - maxPoints).map((point, index) => ({
+//       ...point,
+//       sampleOrder: index,
+//       sampleIndex: index + 1,
+//     }));
+//   }
+
+//   return nextSeries;
+// };
+
+// Appends a batch of raw telemetry rows to an existing flow series.
+// Sorts and trims once per batch instead of once per packet to avoid
+// O(batch_size × series_length) allocations per flush cycle.
+const appendFlowPoints = (series, telemetryRows, { maxPoints = null } = {}) => {
   const existingSeries = series || [];
-  const rows = Array.isArray(telemetryRows) ? telemetryRows : [];
-  const maxPoints = Number.isFinite(options.maxPoints)
-    ? Math.max(0, options.maxPoints)
-    : null;
+  const rows = Array.isArray(telemetryRows) ? telemetryRows : [telemetryRows];
 
   if (rows.length === 0) {
     return existingSeries;
   }
 
-  let changed = false;
-  let nextSeries = existingSeries;
+  const newPoints = rows
+    .filter(shouldDisplayTelemetry)
+    .map((row) => buildFlowPointFromTelemetry(row, 0));
 
-  const insertAtTimestamp = (nextTimestampMs, telemetryRow) => {
-    let low = 0;
-    let high = nextSeries.length;
-
-    while (low < high) {
-      const midpoint = Math.floor((low + high) / 2);
-      if (nextSeries[midpoint].timestampMs <= nextTimestampMs) {
-        low = midpoint + 1;
-      } else {
-        high = midpoint;
-      }
-    }
-
-    const insertionIndex = low;
-    nextSeries.splice(
-      insertionIndex,
-      0,
-      buildFlowPointFromTelemetry(telemetryRow, insertionIndex),
-    );
-
-    for (let index = insertionIndex + 1; index < nextSeries.length; index += 1) {
-      const point = nextSeries[index];
-      nextSeries[index] = {
-        ...point,
-        sampleOrder: index,
-        sampleIndex: index + 1,
-      };
-    }
-  };
-
-  rows.forEach((telemetryRow) => {
-    if (!shouldDisplayTelemetry(telemetryRow)) {
-      return;
-    }
-
-    if (!changed) {
-      nextSeries = existingSeries.slice();
-      changed = true;
-    }
-
-    const nextTimestampMs = new Date(telemetryRow.ts || Date.now()).getTime();
-    const lastPoint = nextSeries[nextSeries.length - 1] || null;
-
-    if (!lastPoint || nextTimestampMs >= lastPoint.timestampMs) {
-      nextSeries.push(buildFlowPointFromTelemetry(telemetryRow, nextSeries.length));
-      return;
-    }
-
-    insertAtTimestamp(nextTimestampMs, telemetryRow);
-  });
-
-  if (!changed) {
+  if (newPoints.length === 0) {
     return existingSeries;
   }
 
-  if (maxPoints !== null && nextSeries.length > maxPoints) {
-    nextSeries = nextSeries.slice(nextSeries.length - maxPoints).map((point, index) => ({
+  const sortedNewPoints = newPoints
+    .slice()
+    .sort((left, right) => left.timestampMs - right.timestampMs);
+  const lastExistingPoint = existingSeries[existingSeries.length - 1] || null;
+  const canFastAppend =
+    !lastExistingPoint ||
+    sortedNewPoints[0].timestampMs >= Number(lastExistingPoint.timestampMs || 0);
+
+  if (canFastAppend) {
+    const rebasedNewPoints = sortedNewPoints.map((point, index) => ({
       ...point,
-      sampleOrder: index,
-      sampleIndex: index + 1,
+      sampleOrder: existingSeries.length + index,
+      sampleIndex: existingSeries.length + index + 1,
     }));
+    const appended = existingSeries.concat(rebasedNewPoints);
+
+    if (maxPoints !== null && appended.length > maxPoints) {
+      const trimmed = appended.slice(appended.length - maxPoints);
+      return trimmed.map((point, index) => ({
+        ...point,
+        sampleOrder: index,
+        sampleIndex: index + 1,
+      }));
+    }
+
+    return appended;
   }
 
-  return nextSeries;
+  const merged = existingSeries.concat(sortedNewPoints);
+  const sorted = merged.sort((a, b) => a.timestampMs - b.timestampMs);
+  const trimmed = maxPoints !== null && sorted.length > maxPoints
+    ? sorted.slice(sorted.length - maxPoints)
+    : sorted;
+
+  return trimmed.map((point, index) => ({
+    ...point,
+    sampleOrder: index,
+    sampleIndex: index + 1,
+  }));
 };
 
 const buildCombinedFlowDataForDrones = ({
@@ -415,76 +469,9 @@ const MOVEMENT_THRESHOLD_METERS = 1.5;
 const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
 const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
 const TELEMETRY_FLUSH_INTERVAL_MS = 120;
-const LIVE_TELEMETRY_RENDER_LIMIT = 4000;
-const DASHBOARD_MAP_RECENT_POINTS_PER_DRONE = 1000;
-const DASHBOARD_MAP_SNAPSHOT_POINTS_PER_DRONE = 250;
+const LIVE_TELEMETRY_RENDER_LIMIT = null;
+const MEASUREMENT_TRACE_STORAGE_LIMIT = 120000;
 const DASHBOARD_START_POINT_FILTER_DEFAULT_RADIUS_METERS = 25;
-
-const compactDashboardMapSeries = (
-  series,
-  {
-    recentPointsPerDrone = DASHBOARD_MAP_RECENT_POINTS_PER_DRONE,
-    snapshotPointsPerDrone = DASHBOARD_MAP_SNAPSHOT_POINTS_PER_DRONE,
-  } = {},
-) => {
-  const points = Array.isArray(series) ? series : [];
-
-  if (!points.length) {
-    return points;
-  }
-
-  const safeRecentPoints = Math.max(1, Math.floor(recentPointsPerDrone));
-  const safeSnapshotPoints = Math.max(1, Math.floor(snapshotPointsPerDrone));
-  const groupedByDrone = new globalThis.Map();
-
-  points.forEach((point) => {
-    const droneId = String(point?.droneId || "unknown").trim() || "unknown";
-    const existingGroup = groupedByDrone.get(droneId);
-
-    if (existingGroup) {
-      existingGroup.push(point);
-      return;
-    }
-
-    groupedByDrone.set(droneId, [point]);
-  });
-
-  const compacted = [];
-
-  groupedByDrone.forEach((dronePoints) => {
-    if (dronePoints.length <= safeRecentPoints) {
-      compacted.push(...dronePoints);
-      return;
-    }
-
-    const historyCutoff = dronePoints.length - safeRecentPoints;
-    const olderPoints = dronePoints.slice(0, historyCutoff);
-    const recentPoints = dronePoints.slice(historyCutoff);
-    const snapshotStep = Math.max(
-      1,
-      Math.ceil(olderPoints.length / safeSnapshotPoints),
-    );
-    const snapshotPoints = olderPoints.filter(
-      (_, index) =>
-        index % snapshotStep === 0 || index === olderPoints.length - 1,
-    );
-
-    compacted.push(...snapshotPoints, ...recentPoints);
-  });
-
-  return compacted
-    .slice()
-    .sort((left, right) => {
-      const leftTimestamp = Number(left?.timestampMs ?? left?.sampleOrder ?? 0);
-      const rightTimestamp = Number(right?.timestampMs ?? right?.sampleOrder ?? 0);
-      return leftTimestamp - rightTimestamp;
-    })
-    .map((point, index) => ({
-      ...point,
-      sampleOrder: index,
-      sampleIndex: index + 1,
-    }));
-};
 
 const toDashboardMapTracePoint = (point) => ({
   id: point.id,
@@ -613,7 +600,7 @@ function App() {
       return selectedRecordedData;
     }
 
-    return flowChartData;
+    return []; // flowChartData;
   }, [liveTelemetryByDrone, recordedFlowDataByDrone, selectedDeviceId]);
 
   const filteredLiveFlowData = useMemo(
@@ -623,26 +610,10 @@ function App() {
       ),
     [liveFlowData, methaneValidityVisibility],
   );
-  const dashboardChartFlowData = useMemo(
-    () => limitSeriesToTail(filteredLiveFlowData, DASHBOARD_CHART_POINT_LIMIT),
-    [filteredLiveFlowData],
-  );
-
-  const maxSelectablePpm = Math.max(
-    fallbackMaxSelectablePpm,
-    getTelemetryPeakValue(filteredLiveFlowData),
-  );
-  const defaultSelectedWindow = useMemo(
-    () => ({
-      startIndex: 0,
-      endIndex: Math.max(0, dashboardChartFlowData.length - 1),
-      ppmMin: 0,
-      ppmMax: maxSelectablePpm,
-    }),
-    [dashboardChartFlowData.length, maxSelectablePpm],
-  );
-  const [selectedWindowOverride, setSelectedWindow] = useState(null);
-  const selectedWindow = selectedWindowOverride ?? defaultSelectedWindow;
+  // const dashboardChartFlowData = useMemo(
+  //   () => limitSeriesToTail(filteredLiveFlowData, DASHBOARD_CHART_POINT_LIMIT),
+  //   [filteredLiveFlowData],
+  // );
 
   useEffect(() => {
     let isCancelled = false;
@@ -711,8 +682,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    let socket;
-    let reconnectTimer;
+    let telemetryWorker;
     let flushTimer;
     const queuedTelemetryByDrone = new globalThis.Map();
 
@@ -752,7 +722,9 @@ function App() {
 
           queuedEntries.forEach(([droneId, telemetryRows]) => {
             const currentSeries = previous[droneId] || [];
-            const updatedSeries = appendFlowPoints(currentSeries, telemetryRows);
+            const updatedSeries = appendFlowPoints(currentSeries, telemetryRows, {
+              maxPoints: MEASUREMENT_TRACE_STORAGE_LIMIT,
+            });
 
             if (updatedSeries !== currentSeries) {
               next[droneId] = updatedSeries;
@@ -778,32 +750,28 @@ function App() {
       }
     };
 
-    const connectTelemetrySocket = () => {
-      if (reconnectTimer) {
-        window.clearTimeout(reconnectTimer);
-      }
+    void waitForBackendReady().then((isBackendReady) => {
+      if (isBackendReady) {
+        telemetryWorker = new Worker(
+          new URL("./workers/telemetryStreamWorker.js", import.meta.url),
+          { type: "module" },
+        );
 
-      try {
-        socket = createTelemetryWebSocket();
+        telemetryWorker.onmessage = (workerEvent) => {
+          const payload = workerEvent.data || {};
+          if (payload.type !== "telemetry-batch") {
+            return;
+          }
 
-        socket.onerror = () => {
-          socket?.close();
-        };
+          const packets = Array.isArray(payload.packets) ? payload.packets : [];
+          if (packets.length === 0 || currentViewRef.current !== "dashboard") {
+            return;
+          }
 
-        socket.onclose = () => {
-          reconnectTimer = window.setTimeout(connectTelemetrySocket, 1000);
-        };
-
-        socket.onmessage = (event) => {
-          try {
-            const packet = normalizeTelemetryPacket(JSON.parse(event.data));
+          packets.forEach((packet) => {
             const packetDataForSeries = packet?.telemetry;
 
             if (!packetDataForSeries?.droneId && !packetDataForSeries?.drone_id) {
-              return;
-            }
-
-            if (currentViewRef.current !== "dashboard") {
               return;
             }
 
@@ -813,7 +781,9 @@ function App() {
                 ? "UDP"
                 : packet?.source === "MQTT"
                   ? "MQTT"
-                  : null;
+                  : packet?.source === "USB-serial"
+                    ? "USB-serial"
+                    : null;
 
             if (source) {
               const previousSource = telemetrySourceByDroneRef.current[droneId];
@@ -887,19 +857,13 @@ function App() {
                 });
               }
             }
-
-          } catch {
-            // Ignore malformed websocket payloads.
-          }
+          });
         };
-      } catch {
-        reconnectTimer = window.setTimeout(connectTelemetrySocket, 1000);
-      }
-    };
 
-    void waitForBackendReady().then((isBackendReady) => {
-      if (isBackendReady) {
-        connectTelemetrySocket();
+        telemetryWorker.postMessage({
+          type: "start",
+          wsUrl: `${backendWsBaseUrl}/ws/telemetry?format=binary`,
+        });
       }
     });
 
@@ -910,13 +874,10 @@ function App() {
 
       flushQueuedTelemetry();
 
-      if (reconnectTimer) {
-        window.clearTimeout(reconnectTimer);
-      }
-
-      if (socket) {
-        socket.onclose = null;
-        socket.close();
+      if (telemetryWorker) {
+        telemetryWorker.postMessage({ type: "stop" });
+        telemetryWorker.terminate();
+        telemetryWorker = null;
       }
     };
   }, []);
@@ -931,27 +892,29 @@ function App() {
       .map((device) => device.id);
   }, [dashboardDroneVisibility, showDashboardPlotData]);
   const dashboardMapTracePoints = useMemo(
-    () =>
-      buildDeckTracePointsFromFlowData(
-        compactDashboardMapSeries(
-          filterFlowPointsOutsideStartRadius(
-            buildCombinedFlowDataForDrones({
-              devices,
-              measurementTraceByDrone,
-              liveTelemetryByDrone,
-              recordedFlowDataByDrone,
-              visibleDroneIds: visibleDashboardDroneIds,
-            }).filter((point) =>
-              shouldIncludeMethaneValidity(point, methaneValidityVisibility),
-            ),
-            {
-              enabled: startPointFilterEnabled,
-              startPoint: startPointCoordinates,
-              radiusMeters: startPointFilterRadiusMeters,
-            },
-          ),
-        ),
-      ).map(toDashboardMapTracePoint),
+    () => {
+      const combinedFlowData = buildCombinedFlowDataForDrones({
+        devices,
+        measurementTraceByDrone,
+        liveTelemetryByDrone,
+        recordedFlowDataByDrone,
+        visibleDroneIds: visibleDashboardDroneIds,
+      });
+      const methaneFilteredFlowData = combinedFlowData.filter((point) =>
+        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+      );
+      const mapFlowData = methaneFilteredFlowData.length
+        ? methaneFilteredFlowData
+        : combinedFlowData;
+
+      return buildDeckTracePointsFromFlowData(
+        filterFlowPointsOutsideStartRadius(mapFlowData, {
+          enabled: startPointFilterEnabled,
+          startPoint: startPointCoordinates,
+          radiusMeters: startPointFilterRadiusMeters,
+        }),
+      ).map(toDashboardMapTracePoint);
+    },
     [
       measurementTraceByDrone,
       liveTelemetryByDrone,
@@ -964,15 +927,7 @@ function App() {
     ],
   );
 
-  const windSamples = useMemo(
-    () =>
-      dashboardChartFlowData.map((point) => ({
-        u: point.wind_u ?? 0,
-        v: point.wind_v ?? 0,
-        w: point.wind_w ?? 0,
-      })),
-    [dashboardChartFlowData],
-  );
+  
 
   const latestPointByDrone = useMemo(() => {
     const entries = {};
@@ -1134,6 +1089,74 @@ function App() {
       window.clearInterval(intervalId);
     };
   }, []);
+
+  const handleStartMeasurement = async () => {
+    if (measurementStatusRef.current !== "idle") {
+      return;
+    }
+
+    setMeasurementBusy(true);
+    const status = await startMeasurement();
+
+    if (status) {
+      setMeasurementStatus(status.status);
+      setMeasurementElapsedSeconds(status.elapsedSeconds);
+      setMeasurementTraceByDrone({});
+      setContinuingMission(null);
+      setCurrentView("dashboard");
+      msgs.current?.clear();
+      msgs.current?.show({
+        life: 2500,
+        severity: "success",
+        summary: "Mission Started",
+        detail: "Measurement recording is now active.",
+        closable: true,
+      });
+    } else {
+      msgs.current?.clear();
+      msgs.current?.show({
+        life: 3500,
+        severity: "error",
+        summary: "Start Failed",
+        detail: "Could not start measurement. Please try again.",
+        closable: true,
+      });
+    }
+
+    setMeasurementBusy(false);
+  };
+
+  const handlePauseMeasurement = async () => {
+    if (measurementStatusRef.current !== "running") {
+      return;
+    }
+
+    setMeasurementBusy(true);
+    const status = await pauseMeasurement();
+
+    if (status) {
+      setMeasurementStatus(status.status);
+      setMeasurementElapsedSeconds(status.elapsedSeconds);
+    }
+
+    setMeasurementBusy(false);
+  };
+
+  const handleResumeMeasurement = async () => {
+    if (measurementStatusRef.current !== "paused") {
+      return;
+    }
+
+    setMeasurementBusy(true);
+    const status = await resumeMeasurement();
+
+    if (status) {
+      setMeasurementStatus(status.status);
+      setMeasurementElapsedSeconds(status.elapsedSeconds);
+    }
+
+    setMeasurementBusy(false);
+  };
 
   const handleDiscardMeasurement = async () => {
     setMeasurementBusy(true);
@@ -1490,11 +1513,11 @@ function App() {
             onRefresh={reloadAllHistory}
           />
         ) : null}
-        {/* <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
+        <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
           <div className="pointer-events-auto rounded-xl bg-white/90 shadow-md backdrop-blur-sm">
             <Messages ref={msgs} />
           </div>
-        </div> */}
+        </div>
 
         <section
           className={tw.shell}
@@ -1619,7 +1642,7 @@ function App() {
                   </div>
                 </div>
                 
-                {/* <MeasurementControls
+                <MeasurementControls
                   status={measurementStatus}
                   elapsedSeconds={measurementElapsedSeconds}
                   isBusy={measurementBusy}
@@ -1627,16 +1650,17 @@ function App() {
                   onPause={handlePauseMeasurement}
                   onResume={handleResumeMeasurement}
                   onStop={() => setIsMissionModalOpen(true)}
-                /> */}
+                />
 
               </div>
 
               {/* <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]"> */}
                <div className="grid w-full gap-3 ">
-                <Map
+                <DeckMap
                   traceDataset={EMPTY_FEATURE_COLLECTION}
                   tracePoints={dashboardMapTracePoints}
                   selectedDroneId={selectedDeviceId}
+                  heatmapOnlyMode={false}
                   visibleDroneIds={visibleDashboardDroneIds}
                   devices={devices}
                   showAllPlottedData={showDashboardPlotData}
@@ -1672,7 +1696,7 @@ function App() {
                   onPlumeViewAutoChange={setPlumeViewEnabled}
                 />
               </div>
-              {selectedDeviceId === "Aeris" ? (
+              {/* {selectedDeviceId === "Aeris" ? (
                 <AerisPanel
                   flowData={dashboardChartFlowData}
                   selection={selectedWindow}
@@ -1689,7 +1713,8 @@ function App() {
                   />
                   <WindPanel windSamples={windSamples} />
                 </div>
-              )}
+              )} */}
+              
             </div>
           </div>
         </section>

@@ -6,8 +6,10 @@ import dotenv from "dotenv";
 import { createServer } from "http";
 import { createSocket } from "node:dgram";
 import { spawn } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
 import dns from "node:dns/promises";
+import v8 from "node:v8";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,6 +91,26 @@ const AERIS_NOTEBOOK_TIMEOUT_MS = Math.max(
   10000,
   Number(process.env.AERIS_NOTEBOOK_TIMEOUT_MS || 180000),
 );
+const TELEMETRY_BINARY_STREAM_ENABLED =
+  process.env.TELEMETRY_BINARY_STREAM !== "false";
+const TELEMETRY_BINARY_FLUSH_INTERVAL_MS = Math.max(
+  16,
+  Number(process.env.TELEMETRY_BINARY_FLUSH_INTERVAL_MS || 80),
+);
+const TELEMETRY_BINARY_MAX_BATCH = Math.max(
+  1,
+  Number(process.env.TELEMETRY_BINARY_MAX_BATCH || 5000),
+);
+const TELEMETRY_CLUSTER_GRID_DEGREES = Math.max(
+  0.0001,
+  Number(process.env.TELEMETRY_CLUSTER_GRID_DEGREES || 0.0005),
+);
+const GC_INTERVAL_MS = Math.max(0, Number(process.env.GC_INTERVAL_MS || 0));
+const GC_MIN_HEAP_USED_MB = Math.max(
+  0,
+  Number(process.env.GC_MIN_HEAP_USED_MB || 256),
+);
+const GC_VERBOSE = process.env.GC_VERBOSE === "true";
 // REMOTE_DB_PENDING_QUEUE_SIZE now defaults to 10,000 for telemetry batching
 const remoteTelemetryStore = createRemoteTelemetryStore({
   telemetryTable: TELEMETRY_TABLE,
@@ -107,6 +129,9 @@ const app = express();
 const server = createServer(app);
 const udpServer = createSocket("udp4");
 const wss = new WebSocketServer({ server, path: "/ws/telemetry" });
+const websocketFormatBySocket = new WeakMap();
+const pendingBinaryTelemetry = [];
+let pendingBinaryFlushTimer = null;
 let activeHttpPort = PORT;
 let activeUdpPort = UDP_PORT;
 let hasInternet = false;
@@ -161,6 +186,186 @@ const measurementStatusPayload = () => ({
   elapsedSeconds: Math.floor(measurementElapsedMs() / 1000),
 });
 
+const toMegabytes = (valueInBytes) =>
+  Number((valueInBytes / (1024 * 1024)).toFixed(2));
+
+const getProcessMemorySnapshot = () => {
+  const usage = process.memoryUsage();
+  const heapStats = v8.getHeapStatistics();
+  return {
+    rssMb: toMegabytes(usage.rss),
+    heapTotalMb: toMegabytes(usage.heapTotal),
+    heapUsedMb: toMegabytes(usage.heapUsed),
+    externalMb: toMegabytes(usage.external),
+    arrayBuffersMb: toMegabytes(usage.arrayBuffers),
+    heapLimitMb: toMegabytes(heapStats.heap_size_limit),
+  };
+};
+
+const runGarbageCollection = (reason = "manual") => {
+  if (typeof global.gc !== "function") {
+    return {
+      triggered: false,
+      reason,
+      message:
+        "Garbage collection is unavailable. Start Node with --expose-gc.",
+      memory: getProcessMemorySnapshot(),
+    };
+  }
+
+  const before = process.memoryUsage();
+  global.gc();
+  const after = process.memoryUsage();
+  const reclaimedMb = toMegabytes(Math.max(0, before.heapUsed - after.heapUsed));
+
+  return {
+    triggered: true,
+    reason,
+    reclaimedMb,
+    memory: getProcessMemorySnapshot(),
+  };
+};
+
+const TELEMETRY_BINARY_MAGIC = 0x544c4d31; // TLM1
+const TELEMETRY_BINARY_VERSION = 1;
+const TELEMETRY_BINARY_ROW_BYTES = 42;
+const SOURCE_CODE_BY_NAME = {
+  MQTT: 1,
+  UDP: 2,
+  "USB-serial": 3,
+};
+
+const toNullableNumber = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toNullableInt16 = (value) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return -32768;
+  }
+
+  const rounded = Math.round(parsed);
+  return Math.max(-32767, Math.min(32767, rounded));
+};
+
+const getSocketFormat = (socket) => websocketFormatBySocket.get(socket) || "json";
+
+const encodeTelemetryBinaryBatch = (rows) => {
+  const samples = Array.isArray(rows) ? rows : [];
+  const payloadBuffers = [];
+  let payloadBytes = 0;
+
+  for (const row of samples) {
+    const telemetry = row?.telemetry || {};
+    const droneId = String(telemetry.drone_id || telemetry.droneId || "");
+    const droneIdBytes = Buffer.from(droneId.slice(0, 255), "utf8");
+    const rowBuffer = Buffer.allocUnsafe(
+      TELEMETRY_BINARY_ROW_BYTES + droneIdBytes.length,
+    );
+
+    let offset = 0;
+    rowBuffer.writeUInt8(
+      SOURCE_CODE_BY_NAME[row?.source] || SOURCE_CODE_BY_NAME.MQTT,
+      offset,
+    );
+    offset += 1;
+
+    rowBuffer.writeInt16LE(toNullableInt16(telemetry.methane_valid), offset);
+    offset += 2;
+
+    rowBuffer.writeInt16LE(toNullableInt16(telemetry.flight_status), offset);
+    offset += 2;
+
+    const timestampMs = Number.isFinite(new Date(telemetry.ts || Date.now()).getTime())
+      ? new Date(telemetry.ts || Date.now()).getTime()
+      : Date.now();
+    rowBuffer.writeDoubleLE(timestampMs, offset);
+    offset += 8;
+
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.latitude) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.longitude) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.altitude) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.methane) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.sniffer) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.purway) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.distance) ?? Number.NaN, offset);
+    offset += 4;
+
+    rowBuffer.writeUInt8(droneIdBytes.length, offset);
+    offset += 1;
+    droneIdBytes.copy(rowBuffer, offset);
+
+    payloadBuffers.push(rowBuffer);
+    payloadBytes += rowBuffer.length;
+  }
+
+  const headerBuffer = Buffer.allocUnsafe(8);
+  headerBuffer.writeUInt32LE(TELEMETRY_BINARY_MAGIC, 0);
+  headerBuffer.writeUInt8(TELEMETRY_BINARY_VERSION, 4);
+  headerBuffer.writeUInt8(0, 5);
+  headerBuffer.writeUInt16LE(samples.length, 6);
+
+  return Buffer.concat([headerBuffer, ...payloadBuffers], 8 + payloadBytes);
+};
+
+const flushBinaryTelemetry = () => {
+  pendingBinaryFlushTimer = null;
+
+  if (!TELEMETRY_BINARY_STREAM_ENABLED || pendingBinaryTelemetry.length === 0) {
+    pendingBinaryTelemetry.length = 0;
+    return;
+  }
+
+  const rows = pendingBinaryTelemetry.splice(0, TELEMETRY_BINARY_MAX_BATCH);
+  if (rows.length === 0) {
+    return;
+  }
+
+  const frame = encodeTelemetryBinaryBatch(rows);
+  for (const socket of wss.clients) {
+    if (socket.readyState !== socket.OPEN || getSocketFormat(socket) !== "binary") {
+      continue;
+    }
+
+    socket.send(frame);
+  }
+
+  if (pendingBinaryTelemetry.length > 0) {
+    pendingBinaryFlushTimer = setTimeout(
+      flushBinaryTelemetry,
+      TELEMETRY_BINARY_FLUSH_INTERVAL_MS,
+    );
+    pendingBinaryFlushTimer.unref?.();
+  }
+};
+
+const queueBinaryTelemetry = (packetObject) => {
+  if (!TELEMETRY_BINARY_STREAM_ENABLED || !packetObject?.data) {
+    return;
+  }
+
+  pendingBinaryTelemetry.push({
+    source: packetObject.source || "MQTT",
+    telemetry: packetObject.data,
+  });
+
+  if (!pendingBinaryFlushTimer) {
+    pendingBinaryFlushTimer = setTimeout(
+      flushBinaryTelemetry,
+      TELEMETRY_BINARY_FLUSH_INTERVAL_MS,
+    );
+    pendingBinaryFlushTimer.unref?.();
+  }
+};
+
 const startMeasurement = ({ excludedDroneIds } = {}) => {
   measurementState.status = "running";
   measurementState.startedAt = Date.now();
@@ -204,6 +409,24 @@ const updateMeasurementConfig = ({ excludedDroneIds } = {}) => {
   measurementState.excludedDroneIds = toExcludedDroneIdSet(excludedDroneIds);
   return measurementStatusPayload();
 };
+
+if (GC_INTERVAL_MS > 0) {
+  const gcTimer = setInterval(() => {
+    const snapshot = getProcessMemorySnapshot();
+    if (snapshot.heapUsedMb < GC_MIN_HEAP_USED_MB) {
+      return;
+    }
+
+    const result = runGarbageCollection("interval");
+    if (GC_VERBOSE) {
+      console.log(
+        `[gc] interval triggered=${result.triggered} reclaimedMb=${result.reclaimedMb ?? 0}`,
+      );
+    }
+  }, GC_INTERVAL_MS);
+
+  gcTimer.unref();
+}
 
 
 let serialPortHandleLive = null;
@@ -1497,9 +1720,10 @@ const broadcastTelemetry = (
   }
 
   const packet = JSON.stringify(packetObject);
+  queueBinaryTelemetry(packetObject);
 
   for (const socket of wss.clients) {
-    if (socket.readyState === socket.OPEN) {
+    if (socket.readyState === socket.OPEN && getSocketFormat(socket) !== "binary") {
       socket.send(packet);
     }
   }
@@ -2186,6 +2410,7 @@ app.get("/api/health", async (_req, res) => {
       serial: serialTelemetryStatus,
       database: "connected",
       measurement: measurementStatusPayload(),
+      memory: getProcessMemorySnapshot(),
       remoteDatabase: remoteTelemetryStore.getStatus(),
       remoteMissionDatabase: remoteMissionStore.getStatus(),
     });
@@ -2227,6 +2452,14 @@ app.post("/api/measurement/stop", (_req, res) => {
 
 app.post("/api/measurement/config", (req, res) => {
   res.json(updateMeasurementConfig(req.body || {}));
+});
+
+app.get("/api/runtime/memory", (_req, res) => {
+  res.json(getProcessMemorySnapshot());
+});
+
+app.post("/api/runtime/gc", (_req, res) => {
+  res.json(runGarbageCollection("http"));
 });
 
 app.post("/api/data/sync", async (_req, res) => {
@@ -2709,6 +2942,14 @@ app.get("/api/telemetry/history", async (req, res) => {
   const toDate = parseQueryDate(req.query.to);
   const limit = Math.min(Number(req.query.limit) || 1000, 100000); // Default 1000, max 100000
   const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const minLatitude = Number(req.query.minLatitude);
+  const maxLatitude = Number(req.query.maxLatitude);
+  const minLongitude = Number(req.query.minLongitude);
+  const maxLongitude = Number(req.query.maxLongitude);
+  const hasLatitudeBounds =
+    Number.isFinite(minLatitude) && Number.isFinite(maxLatitude);
+  const hasLongitudeBounds =
+    Number.isFinite(minLongitude) && Number.isFinite(maxLongitude);
 
   if ((req.query.from && !fromDate) || (req.query.to && !toDate)) {
     return res.status(400).json({
@@ -2718,6 +2959,18 @@ app.get("/api/telemetry/history", async (req, res) => {
 
   if (fromDate && toDate && fromDate > toDate) {
     return res.status(400).json({ error: "from must be before to" });
+  }
+
+  if (hasLatitudeBounds && minLatitude > maxLatitude) {
+    return res.status(400).json({
+      error: "minLatitude must be less than or equal to maxLatitude",
+    });
+  }
+
+  if (hasLongitudeBounds && minLongitude > maxLongitude) {
+    return res.status(400).json({
+      error: "minLongitude must be less than or equal to maxLongitude",
+    });
   }
 
   try {
@@ -2732,6 +2985,20 @@ app.get("/api/telemetry/history", async (req, res) => {
     if (toDate) {
       params.push(toDate);
       filters.push(`ts <= $${params.length}`);
+    }
+
+    if (hasLatitudeBounds) {
+      params.push(minLatitude);
+      filters.push(`latitude >= $${params.length}`);
+      params.push(maxLatitude);
+      filters.push(`latitude <= $${params.length}`);
+    }
+
+    if (hasLongitudeBounds) {
+      params.push(minLongitude);
+      filters.push(`longitude >= $${params.length}`);
+      params.push(maxLongitude);
+      filters.push(`longitude <= $${params.length}`);
     }
 
     const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
@@ -2760,6 +3027,140 @@ app.get("/api/telemetry/history", async (req, res) => {
   } catch (error) {
     console.error("Telemetry history endpoint error:", error.message);
     res.status(500).json({ error: "Failed to fetch telemetry history" });
+  }
+});
+
+app.get("/api/telemetry/history/aggregate", async (req, res) => {
+  const fromDate = parseQueryDate(req.query.from);
+  const toDate = parseQueryDate(req.query.to);
+  const limit = Math.min(Number(req.query.limit) || 5000, 50000);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const minLatitude = Number(req.query.minLatitude);
+  const maxLatitude = Number(req.query.maxLatitude);
+  const minLongitude = Number(req.query.minLongitude);
+  const maxLongitude = Number(req.query.maxLongitude);
+  const hasLatitudeBounds =
+    Number.isFinite(minLatitude) && Number.isFinite(maxLatitude);
+  const hasLongitudeBounds =
+    Number.isFinite(minLongitude) && Number.isFinite(maxLongitude);
+  const gridDegrees = Math.max(
+    0.0001,
+    Number(req.query.gridDegrees) || TELEMETRY_CLUSTER_GRID_DEGREES,
+  );
+
+  if ((req.query.from && !fromDate) || (req.query.to && !toDate)) {
+    return res.status(400).json({
+      error: "Invalid date format for from/to. Use ISO date strings.",
+    });
+  }
+
+  if (fromDate && toDate && fromDate > toDate) {
+    return res.status(400).json({ error: "from must be before to" });
+  }
+
+  if (hasLatitudeBounds && minLatitude > maxLatitude) {
+    return res.status(400).json({
+      error: "minLatitude must be less than or equal to maxLatitude",
+    });
+  }
+
+  if (hasLongitudeBounds && minLongitude > maxLongitude) {
+    return res.status(400).json({
+      error: "minLongitude must be less than or equal to maxLongitude",
+    });
+  }
+
+  try {
+    const filters = ["latitude IS NOT NULL", "longitude IS NOT NULL"];
+    const params = [];
+
+    if (fromDate) {
+      params.push(fromDate);
+      filters.push(`ts >= $${params.length}`);
+    }
+
+    if (toDate) {
+      params.push(toDate);
+      filters.push(`ts <= $${params.length}`);
+    }
+
+    if (hasLatitudeBounds) {
+      params.push(minLatitude);
+      filters.push(`latitude >= $${params.length}`);
+      params.push(maxLatitude);
+      filters.push(`latitude <= $${params.length}`);
+    }
+
+    if (hasLongitudeBounds) {
+      params.push(minLongitude);
+      filters.push(`longitude >= $${params.length}`);
+      params.push(maxLongitude);
+      filters.push(`longitude <= $${params.length}`);
+    }
+
+    params.push(gridDegrees);
+    const gridParam = `$${params.length}`;
+    const whereClause = `WHERE ${filters.join(" AND ")}`;
+
+    const countResult = await sql.unsafe(
+      `
+        SELECT COUNT(*) AS total_count
+        FROM ${TELEMETRY_TABLE}
+        ${whereClause}
+      `,
+      params,
+    );
+    const inputPointCount = Number(countResult?.[0]?.total_count || 0);
+
+    params.push(limit);
+    params.push(offset);
+
+    const result = await sql.unsafe(
+      `
+        SELECT
+          drone_id,
+          topic,
+          ROUND(latitude / ${gridParam}) * ${gridParam} AS latitude,
+          ROUND(longitude / ${gridParam}) * ${gridParam} AS longitude,
+          AVG(methane) AS methane,
+          AVG(sniffer) AS sniffer,
+          AVG(purway) AS purway,
+          MAX(ts) AS ts,
+          COUNT(*) AS point_count
+        FROM ${TELEMETRY_TABLE}
+        ${whereClause}
+        GROUP BY drone_id, topic, ROUND(latitude / ${gridParam}), ROUND(longitude / ${gridParam})
+        ORDER BY ts DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+      `,
+      params,
+    );
+
+    return res.json({
+      data: result.map((row) => ({
+        drone_id: row.drone_id,
+        topic: row.topic,
+        ts: row.ts,
+        latitude: row.latitude,
+        longitude: row.longitude,
+        methane: row.methane,
+        sniffer: row.sniffer,
+        purway: row.purway,
+        point_count: Number(row.point_count || 0),
+      })),
+      aggregation: {
+        gridDegrees,
+        inputPointCount,
+      },
+      pagination: {
+        limit,
+        offset,
+        count: result.length,
+      },
+    });
+  } catch (error) {
+    console.error("Telemetry aggregate endpoint error:", error.message);
+    return res.status(500).json({ error: "Failed to fetch aggregated telemetry history" });
   }
 });
 
@@ -2895,8 +3296,31 @@ app.post("/api/drones/:id/import-distance", async (req, res) => {
   }
 });
 
-wss.on("connection", (socket) => {
-  socket.send(JSON.stringify({ type: "connected", data: { ok: true } }));
+wss.on("connection", (socket, request) => {
+  const requestUrl = new URL(
+    request.url || "/ws/telemetry",
+    `http://${request.headers.host || "127.0.0.1"}`,
+  );
+  const requestedFormat = String(
+    requestUrl.searchParams.get("format") || "json",
+  ).toLowerCase();
+  const socketFormat =
+    TELEMETRY_BINARY_STREAM_ENABLED && requestedFormat === "binary"
+      ? "binary"
+      : "json";
+
+  websocketFormatBySocket.set(socket, socketFormat);
+  socket.send(JSON.stringify({
+    type: "connected",
+    data: {
+      ok: true,
+      format: socketFormat,
+      binarySchema: {
+        magic: "TLM1",
+        version: TELEMETRY_BINARY_VERSION,
+      },
+    },
+  }));
 });
 
 const startServer = async () => {

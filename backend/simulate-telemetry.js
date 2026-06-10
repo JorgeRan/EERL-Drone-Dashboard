@@ -6,9 +6,12 @@ dotenv.config();
 const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883';
 const mqttUsername = process.env.MQTT_USERNAME || 'EERL-MQTT';
 const mqttPassword = process.env.MQTT_PASSWORD || 'CH4Drone';
-const publishIntervalMs = Number(process.env.SIM_INTERVAL_MS || 1000);
+const publishIntervalMs = Number(process.env.SIM_INTERVAL_MS || 500);
 const simulatorVerbose = process.env.SIM_VERBOSE === 'true';
 const summaryEveryTicks = Math.max(1, Number(process.env.SIM_LOG_EVERY_TICKS || 5));
+const gcIntervalMs = Math.max(0, Number(process.env.SIM_GC_INTERVAL_MS || 0));
+const gcMinHeapUsedMb = Math.max(0, Number(process.env.SIM_GC_MIN_HEAP_USED_MB || 128));
+const gcVerbose = process.env.SIM_GC_VERBOSE === 'true';
 
 const topics = (process.env.MQTT_TOPICS || 'M350/data,M400-1/data,M400-2/data')
     .split(',')
@@ -62,6 +65,28 @@ let publishedCount = 0;
 
 const jitter = (magnitude) => (Math.random() - 0.5) * magnitude;
 
+const toMegabytes = (valueInBytes) => Number((valueInBytes / (1024 * 1024)).toFixed(2));
+
+const maybeRunGc = () => {
+    if (gcIntervalMs <= 0 || typeof global.gc !== 'function') {
+        return;
+    }
+
+    const before = process.memoryUsage();
+    const heapUsedMb = toMegabytes(before.heapUsed);
+    if (heapUsedMb < gcMinHeapUsedMb) {
+        return;
+    }
+
+    global.gc();
+
+    if (gcVerbose) {
+        const after = process.memoryUsage();
+        const reclaimedMb = toMegabytes(Math.max(0, before.heapUsed - after.heapUsed));
+        console.log(`[sim-gc] heapUsedMb=${heapUsedMb} reclaimedMb=${reclaimedMb}`);
+    }
+};
+
 const updateDrone = (drone) => {
     drone.heading = (drone.heading + 1 + jitter(10)) % 720;
     const radians = (drone.heading * Math.PI) / 180;
@@ -112,7 +137,7 @@ const publishTick = () => {
         const payloadArray = {
             d: drone.droneId,
             topic: drone.topic,
-            b: Array.from({ length: 11 }, (_, index) => {
+            b: Array.from({ length: 1 }, (_, index) => {
                 const offset = (index + 1) * 0.0001;
                 return [
                     payload.timestamp,
@@ -160,6 +185,12 @@ client.on('connect', () => {
 
     publishTick();
     setInterval(publishTick, publishIntervalMs);
+
+    if (gcIntervalMs > 0) {
+        const gcTimer = setInterval(maybeRunGc, gcIntervalMs);
+        gcTimer.unref();
+        console.log(`[sim-gc] enabled interval=${gcIntervalMs}ms threshold=${gcMinHeapUsedMb}MB`);
+    }
 });
 
 client.on('error', (error) => {

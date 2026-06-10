@@ -180,7 +180,15 @@ export async function listMissions() {
   }
 }
 
-export async function listTelemetryHistory({ limit = 100000, from, to } = {}) {
+export async function listTelemetryHistory({
+  limit = 100000,
+  from,
+  to,
+  minLatitude,
+  maxLatitude,
+  minLongitude,
+  maxLongitude,
+} = {}) {
   try {
     const query = new URLSearchParams();
     if (Number.isFinite(limit) && limit > 0) {
@@ -191,6 +199,18 @@ export async function listTelemetryHistory({ limit = 100000, from, to } = {}) {
     }
     if (typeof to === "string" && to.trim()) {
       query.set("to", to.trim());
+    }
+    if (Number.isFinite(minLatitude)) {
+      query.set("minLatitude", String(minLatitude));
+    }
+    if (Number.isFinite(maxLatitude)) {
+      query.set("maxLatitude", String(maxLatitude));
+    }
+    if (Number.isFinite(minLongitude)) {
+      query.set("minLongitude", String(minLongitude));
+    }
+    if (Number.isFinite(maxLongitude)) {
+      query.set("maxLongitude", String(maxLongitude));
     }
 
     const response = await fetch(
@@ -208,6 +228,69 @@ export async function listTelemetryHistory({ limit = 100000, from, to } = {}) {
     return Array.isArray(payload?.data) ? payload.data : [];
   } catch {
     return [];
+  }
+}
+
+export async function listTelemetryHistoryAggregated({
+  limit = 5000,
+  offset = 0,
+  from,
+  to,
+  gridDegrees,
+  minLatitude,
+  maxLatitude,
+  minLongitude,
+  maxLongitude,
+} = {}) {
+  try {
+    const query = new URLSearchParams();
+    if (Number.isFinite(limit) && limit > 0) {
+      query.set("limit", String(Math.floor(limit)));
+    }
+    if (Number.isFinite(offset) && offset >= 0) {
+      query.set("offset", String(Math.floor(offset)));
+    }
+    if (typeof from === "string" && from.trim()) {
+      query.set("from", from.trim());
+    }
+    if (typeof to === "string" && to.trim()) {
+      query.set("to", to.trim());
+    }
+    if (Number.isFinite(gridDegrees) && gridDegrees > 0) {
+      query.set("gridDegrees", String(gridDegrees));
+    }
+    if (Number.isFinite(minLatitude)) {
+      query.set("minLatitude", String(minLatitude));
+    }
+    if (Number.isFinite(maxLatitude)) {
+      query.set("maxLatitude", String(maxLatitude));
+    }
+    if (Number.isFinite(minLongitude)) {
+      query.set("minLongitude", String(minLongitude));
+    }
+    if (Number.isFinite(maxLongitude)) {
+      query.set("maxLongitude", String(maxLongitude));
+    }
+
+    const response = await fetch(
+      `${backendHttpUrl}/api/telemetry/history/aggregate${query.size ? `?${query.toString()}` : ""}`,
+      {
+        cache: "no-store",
+      },
+    );
+
+    if (!response.ok) {
+      return { data: [], aggregation: null, pagination: null };
+    }
+
+    const payload = await response.json();
+    return {
+      data: Array.isArray(payload?.data) ? payload.data : [],
+      aggregation: payload?.aggregation || null,
+      pagination: payload?.pagination || null,
+    };
+  } catch {
+    return { data: [], aggregation: null, pagination: null };
   }
 }
 

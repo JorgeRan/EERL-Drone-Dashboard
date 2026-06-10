@@ -12,15 +12,14 @@ import {
   SENSOR_MODE_MIXED,
   toFiniteNumber,
 } from "../constants/telemetryMetrics";
-import { Map } from "./Map";
 import { MethanePanel } from "./MethanePanel";
 import { OpacityAdjuster } from "./OpacitySlider";
-import { filterTraceDatasetBySelection } from "../data/methaneTraceData";
 import {
   deleteAllData,
   deleteMission,
   listMissions,
   listTelemetryHistory,
+  listTelemetryHistoryAggregated,
   runAerisAnalysis,
 } from "../services/api";
 import {
@@ -31,12 +30,17 @@ import {
   Pause,
   Square,
   Download,
+  Paperclip,
 } from "lucide-react";
 import { AerisPanel } from "./AerisPanel";
 import { MissionModal } from "./MissionModal";
 import { CSVImportModal } from "./CSVModal";
 import { DeckMap } from "./DeckMap";
+import { Map } from "./Map";
 import { buildDeckTracePointsFromFlowData } from "../shared/deckTraceData";
+import { getScaledMethaneColor } from "../constants/methaneScale";
+import JSZip from "jszip";
+import { fromBlob as geotiffFromBlob } from "geotiff";
 
 const ALL_DRONES_OPTION = "ALL";
 const ALL_DATA_MISSION_ID = "ALL_DATA_MISSION";
@@ -52,6 +56,278 @@ const DELETE_ALL_HOLD_MS = 2000;
 const METHANE_VALID_VALID = 1;
 const METHANE_VALID_INVALID = 2;
 const START_POINT_FILTER_DEFAULT_RADIUS_METERS = 25;
+const VIEWPORT_TELEMETRY_LIMIT = 12000;
+const VIEWPORT_TILE_CACHE_TTL_MS = 15000;
+const VIEWPORT_TILE_CACHE_MAX_ENTRIES = 120;
+const VIEWPORT_ZOOM_BUCKET_STEP = 0.5;
+const ORTHOPHOTO_ACCEPT_ATTR =
+  ".tif,.tiff,.kmz,application/vnd.google-earth.kmz,image/tiff";
+
+const MAX_ORTHOPHOTO_DIMENSION = 2048;
+
+const canvasToBlob = (canvas, mimeType = "image/png") =>
+  new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("Canvas toBlob failed."));
+      }
+    }, mimeType);
+  });
+
+const normalizeOrthophotoCoordinates = (west, south, east, north) => [
+  [west, north],
+  [east, north],
+  [east, south],
+  [west, south],
+];
+
+const isLatLonBounds = ([west, south, east, north]) =>
+  [west, east].every(
+    (value) => Number.isFinite(value) && Math.abs(value) <= 180,
+  ) &&
+  [south, north].every(
+    (value) => Number.isFinite(value) && Math.abs(value) <= 90,
+  ) &&
+  south < north &&
+  west < east;
+
+const buildOrthophotoOverlayFromGeoTiff = async (file) => {
+  const tiff = await geotiffFromBlob(file);
+  const image = await tiff.getImage();
+  const width = Number(image.getWidth?.() ?? image.width ?? 0);
+  const height = Number(image.getHeight?.() ?? image.height ?? 0);
+
+  if (!width || !height) {
+    throw new Error("GeoTIFF image dimensions are missing.");
+  }
+
+  const boundingBox = image.getBoundingBox?.();
+  if (
+    !Array.isArray(boundingBox) ||
+    boundingBox.length !== 4 ||
+    !isLatLonBounds(boundingBox)
+  ) {
+    throw new Error(
+      "GeoTIFF must be georeferenced in latitude/longitude (EPSG:4326).",
+    );
+  }
+
+  const coordinates = normalizeOrthophotoCoordinates(...boundingBox);
+  const rgb = await image.readRGB({ interleave: true });
+
+  // Decode into a full-resolution canvas first.
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = width;
+  srcCanvas.height = height;
+  const srcCtx = srcCanvas.getContext("2d");
+  if (!srcCtx) {
+    throw new Error("Unable to create image canvas.");
+  }
+  const imageData = srcCtx.createImageData(width, height);
+  for (
+    let sourceIndex = 0, targetIndex = 0;
+    targetIndex < imageData.data.length;
+    sourceIndex += 3, targetIndex += 4
+  ) {
+    imageData.data[targetIndex] = rgb[sourceIndex] ?? 0;
+    imageData.data[targetIndex + 1] = rgb[sourceIndex + 1] ?? rgb[sourceIndex] ?? 0;
+    imageData.data[targetIndex + 2] = rgb[sourceIndex + 2] ?? rgb[sourceIndex] ?? 0;
+    imageData.data[targetIndex + 3] = 255;
+  }
+  srcCtx.putImageData(imageData, 0, 0);
+
+  // Downsample to MAX_ORTHOPHOTO_DIMENSION to stay within Mapbox texture limits.
+  const scale = Math.min(1, MAX_ORTHOPHOTO_DIMENSION / Math.max(width, height));
+  const outWidth = Math.round(width * scale);
+  const outHeight = Math.round(height * scale);
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = outWidth;
+  outCanvas.height = outHeight;
+  const outCtx = outCanvas.getContext("2d");
+  if (!outCtx) {
+    throw new Error("Unable to create output canvas.");
+  }
+  outCtx.drawImage(srcCanvas, 0, 0, width, height, 0, 0, outWidth, outHeight);
+
+  // Use a blob URL — much cheaper than a base64 data URL for large rasters.
+  const blob = await canvasToBlob(outCanvas, "image/png");
+  const imageUrl = URL.createObjectURL(blob);
+
+  return {
+    type: "geotiff",
+    fileName: file.name,
+    imageUrl,
+    coordinates,
+    width: outWidth,
+    height: outHeight,
+  };
+};
+
+const resolveKmzAssetPath = (kmlEntryName, href) => {
+  const trimmedHref = String(href || "").trim();
+  if (!trimmedHref) {
+    return "";
+  }
+
+  if (!trimmedHref.includes("../")) {
+    const baseParts = kmlEntryName.split("/");
+    baseParts.pop();
+    return [...baseParts, trimmedHref].filter(Boolean).join("/");
+  }
+
+  const resolved = kmlEntryName.split("/");
+  resolved.pop();
+
+  trimmedHref.split("/").forEach((part) => {
+    if (!part || part === ".") {
+      return;
+    }
+    if (part === "..") {
+      resolved.pop();
+      return;
+    }
+    resolved.push(part);
+  });
+
+  return resolved.join("/");
+};
+
+const buildOrthophotoOverlayFromKmz = async (file) => {
+  const zip = await JSZip.loadAsync(file);
+  const kmlEntry = Object.values(zip.files).find(
+    (entry) => !entry.dir && entry.name.toLowerCase().endsWith(".kml"),
+  );
+  console.log("[buildOrthophotoOverlayFromKmz] KMZ entries:", Object.keys(zip.files));
+  if (!kmlEntry) {
+    throw new Error("KMZ file does not contain a KML document.");
+  }
+
+  const kmlText = await kmlEntry.async("string");
+  console.log("[buildOrthophotoOverlayFromKmz] KML content:", kmlText);
+  const xml = new DOMParser().parseFromString(kmlText, "application/xml");
+  const groundOverlay = xml.querySelector("GroundOverlay");
+
+  if (!groundOverlay) {
+    throw new Error("KMZ must contain a GroundOverlay.");
+  }
+  console.log("[buildOrthophotoOverlayFromKmz] GroundOverlay element found:", groundOverlay);
+
+  const href = groundOverlay.querySelector("Icon > href")?.textContent?.trim();
+  const latLonBox = groundOverlay.querySelector("LatLonBox");
+  console.log("[buildOrthophotoOverlayFromKmz] href:", href);
+  const north = Number(latLonBox?.querySelector("north")?.textContent);
+  const south = Number(latLonBox?.querySelector("south")?.textContent);
+  const east = Number(latLonBox?.querySelector("east")?.textContent);
+  const west = Number(latLonBox?.querySelector("west")?.textContent);
+
+  if (!href || !isLatLonBounds([west, south, east, north])) {
+    throw new Error(
+      "KMZ GroundOverlay must include a valid LatLonBox and image reference.",
+    );
+  }
+
+  const assetPath = resolveKmzAssetPath(kmlEntry.name, href);
+  const imageEntry = zip.file(assetPath) || zip.file(href);
+
+  if (!imageEntry) {
+    throw new Error("KMZ overlay image was not found in the archive.");
+  }
+
+  const imageBlob = await imageEntry.async("blob");
+
+  return {
+    type: "kmz",
+    fileName: file.name,
+    imageUrl: URL.createObjectURL(imageBlob),
+    coordinates: normalizeOrthophotoCoordinates(west, south, east, north),
+  };
+};
+
+const getGridDegreesForZoom = (zoomLevel) => {
+  const zoom = Number(zoomLevel);
+
+  if (zoom >= 16) {
+    return 0.0001;
+  }
+
+  if (zoom >= 14) {
+    return 0.0002;
+  }
+
+  if (zoom >= 12) {
+    return 0.0003;
+  }
+
+  if (zoom >= 10) {
+    return 0.0005;
+  }
+
+  return 0.00075;
+};
+
+const toTileBucket = (value, tileSpan) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || !Number.isFinite(tileSpan) || tileSpan <= 0) {
+    return "na";
+  }
+
+  return String(Math.floor(numeric / tileSpan));
+};
+
+const buildViewportTileCacheKey = ({ viewport, range, gridDegrees }) => {
+  const zoom = Number(viewport?.zoom);
+  const zoomBucket = Number.isFinite(zoom)
+    ? Math.floor(zoom / VIEWPORT_ZOOM_BUCKET_STEP) * VIEWPORT_ZOOM_BUCKET_STEP
+    : 0;
+  const minLatitude = Number(viewport?.minLatitude);
+  const maxLatitude = Number(viewport?.maxLatitude);
+  const minLongitude = Number(viewport?.minLongitude);
+  const maxLongitude = Number(viewport?.maxLongitude);
+  const tileSpan = Math.max(Number(gridDegrees || 0), 0.00005) * 60;
+  const from = typeof range?.from === "string" ? range.from.trim() : "";
+  const to = typeof range?.to === "string" ? range.to.trim() : "";
+
+  return [
+    `z:${zoomBucket.toFixed(1)}`,
+    `g:${Number(gridDegrees || 0).toFixed(6)}`,
+    `lat:${toTileBucket(minLatitude, tileSpan)}:${toTileBucket(maxLatitude, tileSpan)}`,
+    `lon:${toTileBucket(minLongitude, tileSpan)}:${toTileBucket(maxLongitude, tileSpan)}`,
+    `from:${from || "-"}`,
+    `to:${to || "-"}`,
+  ].join("|");
+};
+
+const pruneViewportTileCache = (cache) => {
+  if (!(cache instanceof globalThis.Map)) {
+    return;
+  }
+
+  const now = Date.now();
+
+  for (const [cacheKey, entry] of cache.entries()) {
+    if (now - Number(entry?.cachedAt || 0) > VIEWPORT_TILE_CACHE_TTL_MS) {
+      cache.delete(cacheKey);
+    }
+  }
+
+  if (cache.size <= VIEWPORT_TILE_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  const sortedEntries = [...cache.entries()].sort(
+    (left, right) => Number(left[1]?.cachedAt || 0) - Number(right[1]?.cachedAt || 0),
+  );
+
+  const deleteCount = cache.size - VIEWPORT_TILE_CACHE_MAX_ENTRIES;
+  for (let index = 0; index < deleteCount; index += 1) {
+    const cacheKey = sortedEntries[index]?.[0];
+    if (cacheKey) {
+      cache.delete(cacheKey);
+    }
+  }
+};
 
 const filterFlowPointsOutsideStartRadius = (
   flowPoints,
@@ -201,91 +477,6 @@ const formatCompactValue = (value, digits = 2) => {
 //   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
 // };
 
-const getTraceDisplayMetric = (point) => {
-  if (point.sensorMode === SENSOR_MODE_AERIS) {
-    const aerisCandidates = [
-      { label: "CH4", units: "ppm", value: toFiniteNumber(point.methane) },
-      {
-        label: "Acetylene",
-        units: "ppm",
-        value: toFiniteNumber(point.acetylene),
-      },
-      {
-        label: "Nitrous Oxide",
-        units: "ppm",
-        value: toFiniteNumber(point.nitrousOxide),
-      },
-    ].filter((candidate) => candidate.value !== null && candidate.value > 0);
-
-    if (aerisCandidates.length) {
-      return aerisCandidates.reduce((best, candidate) =>
-        candidate.value > best.value ? candidate : best,
-      );
-    }
-
-    return { label: "CH4", units: "ppm", value: 0 };
-  }
-
-  const purway = toFiniteNumber(point.purway);
-  if (purway !== null) {
-    return { label: "Purway", units: "ppm-m", value: Math.max(0, purway) };
-  }
-
-  return {
-    label: "CH4",
-    units: "ppm",
-    value: Math.max(0, toFiniteNumber(point.methane) ?? 0),
-  };
-};
-
-const buildTraceDatasetFromFlowData = (datasetFlowData) => ({
-  type: "FeatureCollection",
-  features: filterCoordinateOutliers(datasetFlowData)
-    .filter((point) => {
-      // Only check drone coordinates for validity
-      return Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
-    })
-    .map((point) => {
-      const sourceLatitude = point.latitude;
-      const sourceLongitude = point.longitude;
-      const targetLatitude = point.target_latitude ?? point.payload?.target_latitude ?? null;
-      const targetLongitude = point.target_longitude ?? point.payload?.target_longitude ?? null;
-      const traceDisplayMetric = getTraceDisplayMetric(point);
-      const traceValue = traceDisplayMetric.value;
-      return {
-        type: "Feature",
-        geometry: {
-          type: "Point",
-          coordinates: [sourceLongitude, sourceLatitude],
-        },
-        properties: {
-          id: `trace-${point.sampleOrder}`,
-          sampleOrder: point.sampleOrder,
-          sampleIndex: point.sampleIndex,
-          timestampMs: point.timestampMs,
-          timestampIso: point.timestampIso,
-          timeLabel: point.time,
-          altitude: point.altitude,
-          sniffer: point.sniffer,
-          purway: point.purway,
-          acetylene: point.acetylene,
-          nitrousOxide: point.nitrousOxide,
-          sensorMode: point.sensorMode,
-          ch4: point.methane,
-          methane: traceValue,
-          displayMetricLabel: traceDisplayMetric.label,
-          displayMetricUnits: traceDisplayMetric.units,
-          sourceLatitude,
-          sourceLongitude,
-          targetLatitude,
-          targetLongitude,
-          mapCoordinates: point.payload?.map_coordinates === "target" ? "target" : "drone",
-          detected: traceValue > 0,
-          pointColor: traceValue > 0 ? "#4ade80" : "#64748b",
-        },
-      };
-    }),
-});
 const ppmToKgM3 = (
   methanePpm,
   temperatureK = DEFAULT_TEMPERATURE_K,
@@ -374,9 +565,9 @@ const getWindNormalSpeed = (point) => {
   return Math.max(
     0,
     toFiniteNumber(point.speed) ??
-      toFiniteNumber(point.payload?.speed) ??
-      toFiniteNumber(point.payload?.spd) ??
-      0,
+    toFiniteNumber(point.payload?.speed) ??
+    toFiniteNumber(point.payload?.spd) ??
+    0,
   );
 };
 
@@ -603,9 +794,9 @@ const computeAnalysisDerivatives = (selectedFlowData, selectedWindow) => {
   const selectedAnalysisFlowData = filterCoordinateOutliers(selectedWindowFlowData);
   const averageMethane = selectedAnalysisFlowData.length
     ? selectedAnalysisFlowData.reduce(
-        (sum, point) => sum + Number(point.methane || 0),
-        0,
-      ) / selectedAnalysisFlowData.length
+      (sum, point) => sum + Number(point.methane || 0),
+      0,
+    ) / selectedAnalysisFlowData.length
     : 0;
 
   const thresholdSamples = selectedAnalysisFlowData.filter(
@@ -803,6 +994,17 @@ export function ResultsPage({
   });
   const [isTelemetryHistoryLoading, setIsTelemetryHistoryLoading] =
     useState(false);
+  const [mapViewportTelemetrySample, setMapViewportTelemetrySample] = useState([]);
+  const [mapViewportTelemetrySummary, setMapViewportTelemetrySummary] =
+    useState({
+      source: "full-history",
+      inputPointCount: 0,
+      renderedPointCount: 0,
+      zoom: null,
+      cacheHit: false,
+    });
+  const [isMapViewportTelemetryLoading, setIsMapViewportTelemetryLoading] =
+    useState(false);
   const [isDeleteMode, setIsDeleteMode] = useState(false);
   const [deletingMissionId, setDeletingMissionId] = useState(null);
   const [isDeletingAllData, setIsDeletingAllData] = useState(false);
@@ -810,7 +1012,7 @@ export function ResultsPage({
   const [deleteAllHoldProgress, setDeleteAllHoldProgress] = useState(0);
   const [legendScale, setLegendScale] = useState({
     lowerLimit: 0,
-    upperLimit: 5,
+    upperLimit: 200,
   });
   const [plumeViewByMission, setPlumeViewByMission] = useState({});
   const isPlumeViewEnabled = plumeViewByMission[selectedMissionId] ?? false;
@@ -835,6 +1037,9 @@ export function ResultsPage({
   const [analysisImageDataUris, setAnalysisImageDataUris] = useState([]);
   const [analysisError, setAnalysisError] = useState("");
   const [analysisExecutedAt, setAnalysisExecutedAt] = useState("");
+  const [missionOrthophotosById, setMissionOrthophotosById] = useState({});
+  const [orthophotoMessage, setOrthophotoMessage] = useState("");
+  const [isOrthophotoUploading, setIsOrthophotoUploading] = useState(false);
   const [analysisTracerRates, setAnalysisTracerRates] = useState({
     acetylene: "0.0",
     nitrousOxide: "0.0",
@@ -846,6 +1051,10 @@ export function ResultsPage({
   const replayEndIndexRef = useRef(0);
   const analysisWorkerRef = useRef(null);
   const analysisRequestIdRef = useRef(0);
+  const mapViewportDebounceRef = useRef(null);
+  const mapViewportRequestIdRef = useRef(0);
+  const latestMapViewportRef = useRef(null);
+  const mapViewportTileCacheRef = useRef(new globalThis.Map());
   const analysisInputRef = useRef({
     selectedFlowData: [],
     selectedWindow: {
@@ -988,6 +1197,10 @@ export function ResultsPage({
     [telemetryHistorySample],
   );
 
+  const shouldUseViewportTelemetry =
+    selectedMissionId === ALL_DATA_MISSION_ID &&
+    selectedResultDroneId === ALL_DRONES_OPTION;
+
   const loadTelemetryHistory = useCallback(async (range = {}) => {
     setIsTelemetryHistoryLoading(true);
     const loadedTelemetryHistory = await listTelemetryHistory({
@@ -998,6 +1211,101 @@ export function ResultsPage({
     setTelemetryHistorySample(loadedTelemetryHistory);
     setIsTelemetryHistoryLoading(false);
   }, []);
+
+  const handleMapViewportChange = useCallback(
+    (viewport) => {
+      latestMapViewportRef.current = viewport;
+
+      if (!shouldUseViewportTelemetry) {
+        return;
+      }
+
+      if (mapViewportDebounceRef.current) {
+        window.clearTimeout(mapViewportDebounceRef.current);
+      }
+
+      mapViewportDebounceRef.current = window.setTimeout(async () => {
+        const activeViewport = latestMapViewportRef.current;
+        if (!activeViewport) {
+          return;
+        }
+
+        const gridDegrees = getGridDegreesForZoom(activeViewport.zoom);
+        const cacheKey = buildViewportTileCacheKey({
+          viewport: activeViewport,
+          range: telemetryHistoryRange,
+          gridDegrees,
+        });
+        const now = Date.now();
+        pruneViewportTileCache(mapViewportTileCacheRef.current);
+
+        const cachedEntry = mapViewportTileCacheRef.current.get(cacheKey);
+        if (
+          cachedEntry &&
+          now - Number(cachedEntry.cachedAt || 0) <= VIEWPORT_TILE_CACHE_TTL_MS
+        ) {
+          setMapViewportTelemetrySample(cachedEntry.data);
+          setMapViewportTelemetrySummary({
+            ...cachedEntry.summary,
+            source: "viewport-cache",
+            cacheHit: true,
+          });
+          setIsMapViewportTelemetryLoading(false);
+          return;
+        }
+
+        const requestId = mapViewportRequestIdRef.current + 1;
+        mapViewportRequestIdRef.current = requestId;
+        setIsMapViewportTelemetryLoading(true);
+
+        const aggregatedPayload = await listTelemetryHistoryAggregated({
+          limit: VIEWPORT_TELEMETRY_LIMIT,
+          from: telemetryHistoryRange.from || undefined,
+          to: telemetryHistoryRange.to || undefined,
+          minLatitude: activeViewport.minLatitude,
+          maxLatitude: activeViewport.maxLatitude,
+          minLongitude: activeViewport.minLongitude,
+          maxLongitude: activeViewport.maxLongitude,
+          gridDegrees,
+        });
+
+        if (requestId !== mapViewportRequestIdRef.current) {
+          return;
+        }
+
+        const normalizedWindowedData = normalizeTelemetryHistory(
+          aggregatedPayload?.data || [],
+        );
+
+        const summary = {
+          source: "viewport-aggregate",
+          inputPointCount: Number(
+            aggregatedPayload?.aggregation?.inputPointCount || 0,
+          ),
+          renderedPointCount: normalizedWindowedData.length,
+          zoom: Number.isFinite(Number(activeViewport.zoom))
+            ? Number(activeViewport.zoom)
+            : null,
+          cacheHit: false,
+        };
+
+        setMapViewportTelemetrySample(normalizedWindowedData);
+        setMapViewportTelemetrySummary(summary);
+        mapViewportTileCacheRef.current.set(cacheKey, {
+          cachedAt: now,
+          data: normalizedWindowedData,
+          summary,
+        });
+        pruneViewportTileCache(mapViewportTileCacheRef.current);
+        setIsMapViewportTelemetryLoading(false);
+      }, 220);
+    },
+    [
+      shouldUseViewportTelemetry,
+      telemetryHistoryRange.from,
+      telemetryHistoryRange.to,
+    ],
+  );
 
   const missions = useMemo(() => {
     const aggregateFlowData = telemetryHistoryFlowData;
@@ -1077,6 +1385,42 @@ export function ResultsPage({
     [clearMissionSelectionTransitions],
   );
 
+  useEffect(
+    () => () => {
+      if (mapViewportDebounceRef.current) {
+        window.clearTimeout(mapViewportDebounceRef.current);
+        mapViewportDebounceRef.current = null;
+      }
+      mapViewportRequestIdRef.current += 1;
+      mapViewportTileCacheRef.current.clear();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (shouldUseViewportTelemetry) {
+      return;
+    }
+
+    if (mapViewportDebounceRef.current) {
+      window.clearTimeout(mapViewportDebounceRef.current);
+      mapViewportDebounceRef.current = null;
+    }
+
+    mapViewportRequestIdRef.current += 1;
+    mapViewportTileCacheRef.current.clear();
+    setIsMapViewportTelemetryLoading(false);
+    setMapViewportTelemetrySample([]);
+    setMapViewportTelemetrySummary((previous) => ({
+      ...previous,
+      source: "full-history",
+      inputPointCount: 0,
+      renderedPointCount: 0,
+      zoom: null,
+      cacheHit: false,
+    }));
+  }, [shouldUseViewportTelemetry]);
+
   const aggregateMission = useMemo(
     () => missions.find((mission) => mission.id === ALL_DATA_MISSION_ID) || null,
     [missions],
@@ -1091,6 +1435,93 @@ export function ResultsPage({
     () => missions.find((mission) => mission.id === selectedMissionId) || null,
     [missions, selectedMissionId],
   );
+
+  const selectedMissionOrthophoto = useMemo(() => {
+    if (!selectedMission?.id) {
+      return null;
+    }
+
+    return missionOrthophotosById[selectedMission.id] || null;
+  }, [missionOrthophotosById, selectedMission]);
+
+  const handleOrthophotoFileSelected = useCallback(
+    async (file) => {
+      if (!selectedMission?.id || selectedMission.isSynthetic || !file) {
+        return;
+      }
+
+      setIsOrthophotoUploading(true);
+      setOrthophotoMessage("");
+
+      try {
+        const lowerName = file.name.toLowerCase();
+        const overlay = lowerName.endsWith(".kmz")
+          ? await buildOrthophotoOverlayFromKmz(file)
+          : await buildOrthophotoOverlayFromGeoTiff(file);
+
+        setMissionOrthophotosById((previous) => {
+          const old = previous[selectedMission.id];
+          if (old?.imageUrl?.startsWith("blob:")) {
+            URL.revokeObjectURL(old.imageUrl);
+          }
+          console.log(`[handleOrthophotoFileSelected] Attached orthophoto for mission ${selectedMission.id}:`, overlay);
+          return {
+            ...previous,
+            [selectedMission.id]: {
+              ...overlay,
+              attachedAt: new Date().toISOString(),
+            },
+          };
+        });
+        setOrthophotoMessage(
+          `${file.name} attached to ${selectedMission.name}.`,
+        );
+      } catch (error) {
+        setOrthophotoMessage(
+          error instanceof Error
+            ? error.message
+            : "Failed to attach orthophoto.",
+        );
+      } finally {
+        setIsOrthophotoUploading(false);
+      }
+    },
+    [selectedMission],
+  );
+
+  const openOrthophotoPicker = useCallback(() => {
+    if (!selectedMission?.id || selectedMission.isSynthetic) {
+      return;
+    }
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ORTHOPHOTO_ACCEPT_ATTR;
+    input.onchange = (event) => {
+      const file = event.target.files?.[0] || null;
+      if (file) {
+        void handleOrthophotoFileSelected(file);
+      }
+    };
+    input.click();
+  }, [handleOrthophotoFileSelected, selectedMission]);
+
+  const handleRemoveOrthophoto = useCallback(() => {
+    if (!selectedMission?.id || selectedMission.isSynthetic) {
+      return;
+    }
+
+    setMissionOrthophotosById((previous) => {
+      const next = { ...previous };
+      const old = next[selectedMission.id];
+      if (old?.imageUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(old.imageUrl);
+      }
+      delete next[selectedMission.id];
+      return next;
+    });
+    setOrthophotoMessage(`Removed orthophoto from ${selectedMission.name}.`);
+  }, [selectedMission]);
 
   useEffect(() => {
     if (!selectedMission) {
@@ -1344,20 +1775,16 @@ export function ResultsPage({
 
   useEffect(() => () => clearReplayTimer(), [clearReplayTimer]);
 
-  const activeTraceDataset = useMemo(
-    () => buildTraceDatasetFromFlowData(selectedFlowDataForMapWithStartFilter),
-    [selectedFlowDataForMapWithStartFilter],
-  );
-
   const tracePointsForMap = useMemo(
     () => buildDeckTracePointsFromFlowData(selectedFlowDataForMapWithStartFilter),
     [selectedFlowDataForMapWithStartFilter],
   );
-
-  const filteredTraceDataset = useMemo(
-    () => filterTraceDatasetBySelection(activeTraceDataset, selectedWindow),
-    [activeTraceDataset, selectedWindow],
-  );
+  const isViewportTelemetryActive =
+    shouldUseViewportTelemetry &&
+    mapViewportTelemetrySummary.source === "viewport-aggregate";
+  const activeTracePointsForMap = isViewportTelemetryActive
+    ? mapViewportTelemetrySample
+    : tracePointsForMap;
 
   const notebookAnalysisSamples = analysisDerived.notebookAnalysisSamples;
   const aerisTracerAvailability = analysisDerived.aerisTracerAvailability;
@@ -1399,7 +1826,7 @@ export function ResultsPage({
     isDualSensorAnalysis &&
     dualPurwayPathStats.pathLengthSampleCount > 0 &&
     dualPurwayPathStats.pathLengthSampleCount <
-      dualPurwayPathStats.purwaySampleCount;
+    dualPurwayPathStats.purwaySampleCount;
 
   const fluxEstimates = analysisDerived.fluxEstimates;
 
@@ -1685,14 +2112,14 @@ export function ResultsPage({
     const tracerReleaseRates = {
       acetylene:
         aerisTracerAvailability.acetylene &&
-        Number.isFinite(acetyleneTracerRate) &&
-        acetyleneTracerRate > 0
+          Number.isFinite(acetyleneTracerRate) &&
+          acetyleneTracerRate > 0
           ? acetyleneTracerRate
           : null,
       nitrousOxide:
         aerisTracerAvailability.nitrousOxide &&
-        Number.isFinite(nitrousOxideTracerRate) &&
-        nitrousOxideTracerRate > 0
+          Number.isFinite(nitrousOxideTracerRate) &&
+          nitrousOxideTracerRate > 0
           ? nitrousOxideTracerRate
           : null,
     };
@@ -1738,7 +2165,7 @@ export function ResultsPage({
     );
     setAnalysisOutputText(
       result.outputText ||
-        "Notebook ran successfully, but returned no output text.",
+      "Notebook ran successfully, but returned no output text.",
     );
     setIsNotebookRunning(false);
   }, [
@@ -1752,6 +2179,392 @@ export function ResultsPage({
     selectedResultDroneId,
     selectedWindow,
   ]);
+
+  const handleExportGeoJSON = useCallback(() => {
+    if (!tracePointsForMap.length) {
+      return;
+    }
+
+    const { lowerLimit, upperLimit } = legendScale;
+    const span = Math.max(upperLimit - lowerLimit, 0.1);
+    const heatmapThreshold = lowerLimit + span * 0.04;
+    const clamp = (value, minimum, maximum) =>
+      Math.min(Math.max(value, minimum), maximum);
+    const metersToLatitudeDegrees = (meters) => meters / 111320;
+    const metersToLongitudeDegrees = (meters, latitude) =>
+      meters / (111320 * Math.cos((latitude * Math.PI) / 180));
+    const buildCirclePolygon = (longitude, latitude, radiusMeters) => {
+      const segments = 24;
+      const coordinates = [];
+
+      for (let index = 0; index <= segments; index += 1) {
+        const angle = (index / segments) * Math.PI * 2;
+        const latOffset = metersToLatitudeDegrees(radiusMeters * Math.sin(angle));
+        const lonOffset = metersToLongitudeDegrees(
+          radiusMeters * Math.cos(angle),
+          latitude,
+        );
+        coordinates.push([longitude + lonOffset, latitude + latOffset]);
+      }
+
+      return {
+        type: "Polygon",
+        coordinates: [coordinates],
+      };
+    };
+
+    const exportedTracePoints = tracePointsForMap.filter(
+      (point) =>
+        Number.isFinite(Number(point?.latitude)) &&
+        Number.isFinite(Number(point?.longitude)),
+    );
+
+    const pointFeatures = exportedTracePoints.map((point) => {
+      const traceValue = Number(point?.methane ?? 0);
+      const markerColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
+
+      return {
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates:
+            point.altitude != null
+              ? [point.longitude, point.latitude, point.altitude]
+              : [point.longitude, point.latitude],
+        },
+        properties: {
+          exportLayer: "trace-point",
+          "marker-color": markerColor,
+          "marker-size": "small",
+          stroke: markerColor,
+          "stroke-width": 2,
+          fill: markerColor,
+          "fill-opacity": 0.8,
+          timestamp: point.timestampIso ?? null,
+          droneId: point.droneId ?? null,
+          altitude: point.altitude ?? null,
+          methane: traceValue,
+          ch4: point.ch4 ?? null,
+          sniffer: point.sniffer ?? null,
+          purway: point.purway ?? null,
+          acetylene: point.acetylene ?? null,
+          nitrousOxide: point.nitrousOxide ?? null,
+          methaneValid: point.methaneValid ?? null,
+          sensorMode: point.sensorMode ?? null,
+          displayMetricLabel: point.displayMetricLabel ?? null,
+          displayMetricUnits: point.displayMetricUnits ?? null,
+          sampleIndex: point.sampleIndex ?? null,
+          sampleOrder: point.sampleOrder ?? null,
+        },
+      };
+    });
+
+    const heatmapFeatures = exportedTracePoints
+      .filter((point) => Number(point?.methane ?? 0) >= heatmapThreshold)
+      .map((point) => {
+        const traceValue = Number(point?.methane ?? 0);
+        const normalizedWeight = clamp((traceValue - lowerLimit) / span, 0, 1);
+        const heatmapColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
+        const radiusMeters = 7 + normalizedWeight * 15;
+
+        return {
+          type: "Feature",
+          geometry: buildCirclePolygon(point.longitude, point.latitude, radiusMeters),
+          properties: {
+            exportLayer: "heatmap",
+            stroke: heatmapColor,
+            "stroke-width": 1,
+            "stroke-opacity": 0.2 + normalizedWeight * 0.4,
+            fill: heatmapColor,
+            "fill-opacity": 0.12 + normalizedWeight * 0.5,
+            methane: traceValue,
+            heatmapWeight: normalizedWeight,
+            heatmapRadiusMeters: radiusMeters,
+            heatmapThreshold,
+            droneId: point.droneId ?? null,
+            timestamp: point.timestampIso ?? null,
+            displayMetricLabel: point.displayMetricLabel ?? null,
+            displayMetricUnits: point.displayMetricUnits ?? null,
+          },
+        };
+      });
+
+    const geojson = {
+      type: "FeatureCollection",
+      colorScale: { lowerLimit, upperLimit },
+      heatmap: {
+        threshold: heatmapThreshold,
+        pointCount: heatmapFeatures.length,
+      },
+      features: [...heatmapFeatures, ...pointFeatures],
+    };
+    const missionLabel = selectedMission?.name
+      ? selectedMission.name.replace(/[^a-zA-Z0-9_-]/g, "_")
+      : "mission";
+    const droneLabel =
+      selectedResultDroneId !== ALL_DRONES_OPTION
+        ? `_${selectedResultDroneId}`
+        : "";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filename = `${missionLabel}${droneLabel}_${timestamp}.geojson`;
+
+    const blob = new Blob([JSON.stringify(geojson, null, 2)], {
+      type: "application/geo+json",
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(objectUrl);
+  }, [tracePointsForMap, legendScale, selectedMission, selectedResultDroneId]);
+
+  const handleExportKMZ = useCallback(async () => {
+    if (!tracePointsForMap.length) {
+      return;
+    }
+
+    const { lowerLimit, upperLimit } = legendScale;
+    const span = Math.max(upperLimit - lowerLimit, 0.1);
+    const heatmapThreshold = lowerLimit + span * 0.04;
+
+    const xmlEscape = (value) =>
+      String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
+
+    const clamp = (value, minimum, maximum) =>
+      Math.min(Math.max(value, minimum), maximum);
+
+    const toKmlColor = (hexColor, alphaHex = "ff") => {
+      const safe = String(hexColor || "").replace("#", "");
+      if (safe.length !== 6) {
+        return `${alphaHex}b8bd38`;
+      }
+
+      const red = safe.slice(0, 2);
+      const green = safe.slice(2, 4);
+      const blue = safe.slice(4, 6);
+      return `${alphaHex}${blue}${green}${red}`;
+    };
+
+    const metersToLatitudeDegrees = (meters) => meters / 111320;
+    const metersToLongitudeDegrees = (meters, latitude) =>
+      meters / (111320 * Math.cos((latitude * Math.PI) / 180));
+
+    const buildCircleCoordinates = (longitude, latitude, radiusMeters) => {
+      const segments = 24;
+      const coordinates = [];
+
+      for (let index = 0; index <= segments; index += 1) {
+        const angle = (index / segments) * Math.PI * 2;
+        const latOffset = metersToLatitudeDegrees(radiusMeters * Math.sin(angle));
+        const lonOffset = metersToLongitudeDegrees(
+          radiusMeters * Math.cos(angle),
+          latitude,
+        );
+        coordinates.push(`${longitude + lonOffset},${latitude + latOffset},0`);
+      }
+
+      return coordinates.join(" ");
+    };
+
+    const sanitizeKmzAssetName = (value, fallbackName) =>
+      String(value || fallbackName)
+        .trim()
+        .replace(/[^a-zA-Z0-9._-]+/g, "_")
+        .replace(/^_+|_+$/g, "") || fallbackName;
+
+    const mimeTypeToExtension = (mimeType) => {
+      const normalized = String(mimeType || "").toLowerCase();
+
+      if (normalized.includes("png")) {
+        return "png";
+      }
+
+      if (normalized.includes("jpeg") || normalized.includes("jpg")) {
+        return "jpg";
+      }
+
+      if (normalized.includes("webp")) {
+        return "webp";
+      }
+
+      return "png";
+    };
+
+    const zip = new JSZip();
+
+    const exportedTracePoints = tracePointsForMap.filter(
+      (point) =>
+        Number.isFinite(Number(point?.latitude)) &&
+        Number.isFinite(Number(point?.longitude)),
+    );
+
+    if (!exportedTracePoints.length) {
+      return;
+    }
+
+    const missionLabelRaw = selectedMission?.name || "Mission";
+    const missionLabel = xmlEscape(missionLabelRaw);
+
+    const pointStyleMap = new globalThis.Map();
+    const pointStyleDefs = [];
+    const pointPlacemarks = exportedTracePoints.map((point, index) => {
+      const traceValue = Number(point?.methane ?? 0);
+      const markerColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
+      const styleKey = `${markerColor.toLowerCase()}-pt`;
+
+      if (!pointStyleMap.has(styleKey)) {
+        const styleId = `pt-${pointStyleMap.size}`;
+        pointStyleMap.set(styleKey, styleId);
+        pointStyleDefs.push(
+          `<Style id="${styleId}"><IconStyle><color>${toKmlColor(markerColor, "f0")}</color><scale>0.9</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`,
+        );
+      }
+
+      const styleId = pointStyleMap.get(styleKey);
+      const altitude = Number(point?.altitude ?? 0);
+      const displayMetricLabel = xmlEscape(point?.displayMetricLabel || "Value");
+      const displayMetricUnits = xmlEscape(point?.displayMetricUnits || "");
+      const description = xmlEscape(
+        `${displayMetricLabel}: ${traceValue.toFixed(3)} ${displayMetricUnits}\nDrone: ${point?.droneId || "unknown"}\nTime: ${point?.timestampIso || "n/a"}`,
+      );
+
+      return `<Placemark><name>Sample ${index + 1}</name><styleUrl>#${styleId}</styleUrl><description>${description}</description><Point><coordinates>${point.longitude},${point.latitude},${altitude}</coordinates></Point></Placemark>`;
+    });
+
+    const pathCoordinates = exportedTracePoints
+      .map((point) => `${point.longitude},${point.latitude},${Number(point?.altitude ?? 0)}`)
+      .join(" ");
+    const pathPlacemark = `<Placemark><name>Mission Path</name><Style><LineStyle><color>ff4ade80</color><width>3</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>${pathCoordinates}</coordinates></LineString></Placemark>`;
+
+    const heatStyleMap = new globalThis.Map();
+    const heatStyleDefs = [];
+    const heatPlacemarks = exportedTracePoints
+      .filter((point) => Number(point?.methane ?? 0) >= heatmapThreshold)
+      .map((point, index) => {
+        const traceValue = Number(point?.methane ?? 0);
+        const normalizedWeight = clamp((traceValue - lowerLimit) / span, 0, 1);
+        const heatColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
+        const radiusMeters = 7 + normalizedWeight * 15;
+        const styleKey = `${heatColor.toLowerCase()}-heat`;
+
+        if (!heatStyleMap.has(styleKey)) {
+          const styleId = `heat-${heatStyleMap.size}`;
+          heatStyleMap.set(styleKey, styleId);
+          heatStyleDefs.push(
+            `<Style id="${styleId}"><LineStyle><color>${toKmlColor(heatColor, "44")}</color><width>1</width></LineStyle><PolyStyle><color>${toKmlColor(heatColor, "66")}</color><fill>1</fill><outline>1</outline></PolyStyle></Style>`,
+          );
+        }
+
+        const styleId = heatStyleMap.get(styleKey);
+        const polygonCoordinates = buildCircleCoordinates(
+          point.longitude,
+          point.latitude,
+          radiusMeters,
+        );
+
+        return `<Placemark><name>Heat ${index + 1}</name><styleUrl>#${styleId}</styleUrl><Polygon><tessellate>2</tessellate><altitudeMode>relativeToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${polygonCoordinates}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`;
+      });
+
+    const orthophotoOverlay =
+      selectedMissionOrthophoto?.imageUrl &&
+      Array.isArray(selectedMissionOrthophoto.coordinates) &&
+      selectedMissionOrthophoto.coordinates.length === 4
+        ? selectedMissionOrthophoto
+        : null;
+
+    let orthophotoAssetName = null;
+    if (orthophotoOverlay) {
+      const imageResponse = await fetch(orthophotoOverlay.imageUrl);
+      if (!imageResponse.ok) {
+        throw new Error(
+          "Failed to read the attached mission image for KMZ export.",
+        );
+      }
+
+      const imageBlob = await imageResponse.blob();
+      const assetBaseName = sanitizeKmzAssetName(
+        orthophotoOverlay.fileName?.replace(/\.[^.]+$/, "") ||
+          "mission_orthophoto",
+        "mission_orthophoto",
+      );
+      orthophotoAssetName = `images/${assetBaseName}.${mimeTypeToExtension(imageBlob.type)}`;
+      zip.file(orthophotoAssetName, imageBlob);
+    }
+
+    const orthophotoFolder = orthophotoOverlay
+      ? `<Folder>
+      <name>Orthophoto Overlay</name>
+      <GroundOverlay>
+        <name>${xmlEscape(orthophotoOverlay.fileName || "Orthophoto")}</name>
+        <Icon>
+          <href>${xmlEscape(orthophotoAssetName)}</href>
+        </Icon>
+        <drawOrder>0</drawOrder>
+        <LatLonBox>
+          <north>${orthophotoOverlay.coordinates[0]?.[1] ?? 90}</north>
+          <south>${orthophotoOverlay.coordinates[2]?.[1] ?? -90}</south>
+          <east>${orthophotoOverlay.coordinates[1]?.[0] ?? 180}</east>
+          <west>${orthophotoOverlay.coordinates[0]?.[0] ?? -180}</west>
+        </LatLonBox>
+      </GroundOverlay>
+    </Folder>`
+      : "";
+
+    const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${missionLabel}</name>
+    <description>${xmlEscape(
+      `Generated by EERL Dashboard. Scale ${lowerLimit.toFixed(2)} to ${upperLimit.toFixed(2)}.`,
+    )}</description>
+    ${pointStyleDefs.join("\n    ")}
+    ${heatStyleDefs.join("\n    ")}
+    <Folder>
+      <name>Mission Path</name>
+      ${pathPlacemark}
+    </Folder>
+    <Folder>
+      <name>Sample Points</name>
+      ${pointPlacemarks.join("\n      ")}
+      </Folder>
+    <Folder>
+      <name>Heatmap Footprints</name>
+      ${heatPlacemarks.join("\n      ")}
+    </Folder>
+    ${orthophotoFolder}
+  </Document>
+</kml>`;
+
+    const missionFileLabel = selectedMission?.name
+      ? selectedMission.name.replace(/[^a-zA-Z0-9_-]/g, "_")
+      : "mission";
+    const droneLabel =
+      selectedResultDroneId !== ALL_DRONES_OPTION
+        ? `_${selectedResultDroneId}`
+        : "";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filename = `${missionFileLabel}${droneLabel}_${timestamp}.kmz`;
+
+    zip.file("doc.kml", kml);
+    const blob = await zip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 },
+      mimeType: "application/vnd.google-earth.kmz",
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(objectUrl);
+  }, [tracePointsForMap, legendScale, selectedMission, selectedResultDroneId]);
 
   const handleDownloadAnalysis = useCallback(() => {
     if (!analysisImageDataUris.length && !analysisOutputText) {
@@ -2102,7 +2915,15 @@ export function ResultsPage({
                   className="text-[11px]"
                   style={{ color: color.textMuted }}
                 >
-                  {isTelemetryHistoryLoading ? "Loading..." : "Latest 100,000 rows max"}
+                  {isTelemetryHistoryLoading
+                    ? "Loading..."
+                    : shouldUseViewportTelemetry
+                      ? isMapViewportTelemetryLoading
+                        ? "Viewport loading..."
+                        : mapViewportTelemetrySummary.cacheHit
+                          ? "Viewport cache hit"
+                          : "Viewport aggregate mode"
+                      : "Latest 100,000 rows max"}
                 </span>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -2182,6 +3003,14 @@ export function ResultsPage({
                   Clear Range
                 </button>
               </div>
+              {shouldUseViewportTelemetry ? (
+                <p className="mt-2 text-[11px]" style={{ color: color.textMuted }}>
+                  Windowed map points: {mapViewportTelemetrySummary.renderedPointCount.toLocaleString()} / {mapViewportTelemetrySummary.inputPointCount.toLocaleString()} in view
+                  {Number.isFinite(mapViewportTelemetrySummary.zoom)
+                    ? ` (z${mapViewportTelemetrySummary.zoom.toFixed(1)})`
+                    : ""}
+                </p>
+              ) : null}
               <div className="mt-4 flex items-center justify-end">
                 <button
                   type="button"
@@ -2469,81 +3298,81 @@ export function ResultsPage({
         </div>
 
         {isDualSensorAnalysis ? (
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <div
-            className="rounded-lg border px-3 py-3"
-            style={{ backgroundColor: color.card, borderColor: color.border }}
-          >
-            <p
-              className="text-[11px] uppercase tracking-[0.12em]"
-              style={{ color: color.textDim }}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div
+              className="rounded-lg border px-3 py-3"
+              style={{ backgroundColor: color.card, borderColor: color.border }}
             >
-              Unified Emission
-            </p>
-            <p
-              className="mt-1 text-xl font-semibold"
-              style={{ color: color.text }}
-            >
-              {isDualEstimateBlocked
-                ? "CSV required"
-                : `${formatCompactValue(
+              <p
+                className="text-[11px] uppercase tracking-[0.12em]"
+                style={{ color: color.textDim }}
+              >
+                Unified Emission
+              </p>
+              <p
+                className="mt-1 text-xl font-semibold"
+                style={{ color: color.text }}
+              >
+                {isDualEstimateBlocked
+                  ? "CSV required"
+                  : `${formatCompactValue(
                     fluxEstimates.emissionRate.emissionRateKgH,
                     3,
                   )} kg/h`}
-            </p>
+              </p>
+            </div>
+            <div
+              className="rounded-lg border px-3 py-3"
+              style={{ backgroundColor: color.card, borderColor: color.border }}
+            >
+              <p
+                className="text-[11px] uppercase tracking-[0.12em]"
+                style={{ color: color.textDim }}
+              >
+                Confidence
+              </p>
+              <p
+                className="mt-1 text-xl font-semibold"
+                style={{ color: color.text }}
+              >
+                {confidenceScore}%
+              </p>
+            </div>
+            <div
+              className="rounded-lg border px-3 py-3"
+              style={{ backgroundColor: color.card, borderColor: color.border }}
+            >
+              <p
+                className="text-[11px] uppercase tracking-[0.12em]"
+                style={{ color: color.textDim }}
+              >
+                Avg Methane
+              </p>
+              <p
+                className="mt-1 text-xl font-semibold"
+                style={{ color: color.text }}
+              >
+                {averageMethane.toFixed(2)} ppm
+              </p>
+            </div>
+            <div
+              className="rounded-lg border px-3 py-3"
+              style={{ backgroundColor: color.card, borderColor: color.border }}
+            >
+              <p
+                className="text-[11px] uppercase tracking-[0.12em]"
+                style={{ color: color.textDim }}
+              >
+                Threshold Samples
+              </p>
+              <p
+                className="mt-1 text-xl font-semibold"
+                style={{ color: color.text }}
+              >
+                {thresholdSamples}
+              </p>
+            </div>
           </div>
-          <div
-            className="rounded-lg border px-3 py-3"
-            style={{ backgroundColor: color.card, borderColor: color.border }}
-          >
-            <p
-              className="text-[11px] uppercase tracking-[0.12em]"
-              style={{ color: color.textDim }}
-            >
-              Confidence
-            </p>
-            <p
-              className="mt-1 text-xl font-semibold"
-              style={{ color: color.text }}
-            >
-              {confidenceScore}%
-            </p>
-          </div>
-          <div
-            className="rounded-lg border px-3 py-3"
-            style={{ backgroundColor: color.card, borderColor: color.border }}
-          >
-            <p
-              className="text-[11px] uppercase tracking-[0.12em]"
-              style={{ color: color.textDim }}
-            >
-              Avg Methane
-            </p>
-            <p
-              className="mt-1 text-xl font-semibold"
-              style={{ color: color.text }}
-            >
-              {averageMethane.toFixed(2)} ppm
-            </p>
-          </div>
-          <div
-            className="rounded-lg border px-3 py-3"
-            style={{ backgroundColor: color.card, borderColor: color.border }}
-          >
-            <p
-              className="text-[11px] uppercase tracking-[0.12em]"
-              style={{ color: color.textDim }}
-            >
-              Threshold Samples
-            </p>
-            <p
-              className="mt-1 text-xl font-semibold"
-              style={{ color: color.text }}
-            >
-              {thresholdSamples}
-            </p>
-          </div>
-        </div>
         ) : null}
 
         <div className="grid gap-3 xl:grid-cols-[1.35fr_0.65fr] h-full">
@@ -2618,14 +3447,14 @@ export function ResultsPage({
                   style={{
                     opacity:
                       isMissionLoading ||
-                      !selectedFlowData.length ||
-                      isReplayPlaying
+                        !selectedFlowData.length ||
+                        isReplayPlaying
                         ? 0.55
                         : 1,
                   }}
                 >
                   {replayEndIndexRef.current >=
-                  Math.max(0, selectedFlowData.length - 1) ? (
+                    Math.max(0, selectedFlowData.length - 1) ? (
                     <RotateCcw size={20} />
                   ) : (
                     <Play size={20} />
@@ -2661,8 +3490,9 @@ export function ResultsPage({
               {selectedMission ? (
                 <div className="relative">
                   <Map
-                    traceDataset={filteredTraceDataset}
-                    tracePoints={tracePointsForMap}
+                    traceDataset={{ type: "FeatureCollection", features: [] }}
+                    tracePoints={activeTracePointsForMap}
+                    orthophotoOverlay={selectedMissionOrthophoto}
                     onScaleChange={setLegendScale}
                     selectedDroneId={
                       selectedResultDroneId === ALL_DRONES_OPTION
@@ -2730,6 +3560,7 @@ export function ResultsPage({
                       setStartPointFilterEnabled(false);
                     }}
                     onTraceRenderComplete={handleMapTraceRenderComplete}
+                    onViewportChange={handleMapViewportChange}
                     missionConfiguration={sensorsMode}
                   />
 
@@ -2774,7 +3605,54 @@ export function ResultsPage({
               )}
             </div>
             {isMissionLoading ? null : (
-              <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />
+              <div className="flex flex-row items-center justify-between gap-2">
+                <OpacityAdjuster value={traceOpacity} onChange={setTraceOpacity} />
+                <div >
+                  <button
+                    type="button"
+                    disabled={
+                      !selectedMission ||
+                      selectedMission.isSynthetic ||
+                      isOrthophotoUploading
+                    }
+                    onClick={openOrthophotoPicker}
+                    className="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-lg font-medium transition-colors w-full justify-center"
+                    style={{
+                      backgroundColor: color.surface,
+                      borderColor: color.borderStrong,
+                      color: color.orange,
+                    }}
+                  >
+                    <Paperclip size={18} />
+                    {isOrthophotoUploading ? "Attaching..." : "Attach Orthophoto"}
+                  </button>
+                  {selectedMissionOrthophoto ? (
+                    <div
+                      className="mt-2 flex items-center gap-2 text-xs"
+                      style={{ color: color.textMuted }}
+                    >
+                      <span>{selectedMissionOrthophoto.fileName}</span>
+                      <button
+                        type="button"
+                        onClick={handleRemoveOrthophoto}
+                        className="rounded-md px-2 py-1 font-semibold"
+                        style={{
+                          backgroundColor: color.surface,
+                          border: `1px solid ${color.borderStrong}`,
+                          color: color.orange,
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : null}
+                  {orthophotoMessage ? (
+                    <p className="mt-2 text-xs" style={{ color: color.textMuted }}>
+                      {orthophotoMessage}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
             )}
 
             <div
@@ -2921,7 +3799,7 @@ export function ResultsPage({
               </div>
             ) : null}
 
-            <div
+            {/* <div
               className="relative min-h-[280px] rounded-lg border p-3"
               style={{ backgroundColor: color.card, borderColor: color.border }}
             >
@@ -2973,96 +3851,100 @@ export function ResultsPage({
                   </div>
                 </div>
               ) : null}
-            </div>
+            </div> */}
 
             {isMissionLoading ? null : (
-            <div
-              className="min-h-[120px]  rounded-lg border p-3"
-              style={{
-                backgroundColor: color.card,
-                borderColor: color.border,
-              }}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <h4
-                    className="text-sm font-semibold"
-                    style={{ color: color.text }}
+              <div
+                className="min-h-[120px]  rounded-lg border p-3"
+                style={{
+                  backgroundColor: color.card,
+                  borderColor: color.border,
+                }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h4
+                      className="text-sm font-semibold"
+                      style={{ color: color.text }}
+                    >
+                      Analysis Outputs
+                    </h4>
+                    <p
+                      className="mt-0.5 text-[11px]"
+                      style={{ color: color.textDim }}
+                    >
+                      Export mission artifacts with one tap.
+                    </p>
+                  </div>
+                  <span
+                    className="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
+                    style={{
+                      color: color.text,
+                      backgroundColor: color.surface,
+                      border: `1px solid ${color.borderStrong}`,
+                    }}
                   >
-                    Analysis Outputs
-                  </h4>
-                  <p
-                    className="mt-0.5 text-[11px]"
-                    style={{ color: color.textDim }}
-                  >
-                    Export mission artifacts with one tap.
-                  </p>
+                    Ready
+                  </span>
                 </div>
-                <span
-                  className="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
-                  style={{
-                    color: color.text,
-                    backgroundColor: color.surface,
-                    border: `1px solid ${color.borderStrong}`,
-                  }}
-                >
-                  Ready
-                </span>
+
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
+                    style={{
+                      borderColor: "rgba(106, 214, 194, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(106, 214, 194, 0.24) 0%, rgba(106, 214, 194, 0.08) 45%, rgba(8, 15, 17, 0.6) 100%)",
+                    }}
+                  >
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      Spreadsheet (.csv)
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
+                    style={{
+                      borderColor: "rgba(86, 142, 255, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(86, 142, 255, 0.25) 0%, rgba(86, 142, 255, 0.08) 45%, rgba(8, 13, 26, 0.58) 100%)",
+                    }}
+                    onClick={handleExportGeoJSON}
+                  >
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      GeoJSON (.geojson)
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
+                    style={{
+                      borderColor: "rgba(253, 148, 86, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(253, 148, 86, 0.28) 0%, rgba(253, 148, 86, 0.08) 50%, rgba(10, 14, 20, 0.55) 100%)",
+                    }}
+                    onClick={() => {
+                      void handleExportKMZ();
+                    }}
+                  >
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      Google Earth (.kmz)
+                    </p>
+                  </button>
+                </div>
               </div>
-
-              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <button
-                  type="button"
-                  className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
-                  style={{
-                    borderColor: "rgba(106, 214, 194, 0.45)",
-                    background:
-                      "linear-gradient(150deg, rgba(106, 214, 194, 0.24) 0%, rgba(106, 214, 194, 0.08) 45%, rgba(8, 15, 17, 0.6) 100%)",
-                  }}
-                >
-                  <p
-                    className="mt-1 text-sm font-semibold"
-                    style={{ color: "#ffffff" }}
-                  >
-                    Spreadsheet
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
-                  style={{
-                    borderColor: "rgba(86, 142, 255, 0.45)",
-                    background:
-                      "linear-gradient(150deg, rgba(86, 142, 255, 0.25) 0%, rgba(86, 142, 255, 0.08) 45%, rgba(8, 13, 26, 0.58) 100%)",
-                  }}
-                >
-                  <p
-                    className="mt-1 text-sm font-semibold"
-                    style={{ color: "#ffffff" }}
-                  >
-                    GeoJSON
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
-                  style={{
-                    borderColor: "rgba(253, 148, 86, 0.45)",
-                    background:
-                      "linear-gradient(150deg, rgba(253, 148, 86, 0.28) 0%, rgba(253, 148, 86, 0.08) 50%, rgba(10, 14, 20, 0.55) 100%)",
-                  }}
-                >
-                  <p
-                    className="mt-1 text-sm font-semibold"
-                    style={{ color: "#ffffff" }}
-                  >
-                    Report
-                  </p>
-                </button>
-              </div>
-            </div>
             )}
           </div>
         </div>

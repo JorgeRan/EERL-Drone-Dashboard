@@ -54,6 +54,8 @@ const DRONE_COLOR_FALLBACK_PALETTE = [
 ];
 const EMPTY_FEATURE_COLLECTION = { type: "FeatureCollection", features: [] };
 const DASHBOARD_TRACE_SOURCE_UPDATE_DEBOUNCE_MS = 150;
+const ORTHOPHOTO_SOURCE_ID = "mission-orthophoto";
+const ORTHOPHOTO_LAYER_ID = "mission-orthophoto-layer";
 
 const toFiniteNumber = (value) => {
   const parsed = Number(value);
@@ -499,6 +501,7 @@ const fitMapToDroneStates = (
 export function Map({
   traceDataset,
   tracePoints,
+  orthophotoOverlay = null,
   onScaleChange,
   selectedDroneId,
   visibleDroneIds,
@@ -510,12 +513,14 @@ export function Map({
   methaneValidityVisibility = { valid: true, invalid: true, noData: false },
   onToggleMethaneValidity,
   resultsPageMode,
+  heatmapOnlyMode = false,
   heatmapEnabled = true,
   plumeViewEnabled = false,
   traceOpacity = 1,
   onToggleHeatmap,
   onTogglePlumeView,
   onPlumeViewAutoChange,
+  onViewportChange,
   onTraceRenderComplete,
   startPointFilterEnabled = false,
   onToggleStartPointFilter,
@@ -536,6 +541,7 @@ export function Map({
   const traceSourceUpdateTimeoutRef = useRef(null);
   const plumeModeFromTiltRef = useRef(plumeViewEnabled);
   const onPlumeViewAutoChangeRef = useRef(onPlumeViewAutoChange);
+  const onViewportChangeRef = useRef(onViewportChange);
   const resolvedTraceDataset = useMemo(
     () =>
       Array.isArray(tracePoints) && tracePoints.length > 0
@@ -561,9 +567,11 @@ export function Map({
   const [showFlightPath, setShowFlightPath] = useState(false);
   const [showTargetMarkers, setShowTargetMarkers] = useState(false);
   const [isAutoCenterEnabled, setIsAutoCenterEnabled] = useState(true);
+  const [isStyleReady, setIsStyleReady] = useState(false);
   const [droneStates, setDroneStates] = useState([]);
   const [droneTrackHistory, setDroneTrackHistory] = useState({});
   const [isTelemetryConnected, setIsTelemetryConnected] = useState(false);
+  const [lastTraceRenderMs, setLastTraceRenderMs] = useState(null);
   const mapMode = shouldUseOnlineMap(mapboxToken) ? "online" : "offline";
   const methaneScale = buildMethaneScale(lowerLimit, upperLimit);
   const methaneGradient = buildMethaneGradient(lowerLimit, upperLimit);
@@ -574,6 +582,7 @@ export function Map({
       Number.isFinite(Number(traceOpacity)) ? Number(traceOpacity) : 1,
     ),
   );
+  const isHeatmapOnlyActive = !resultsPageMode && heatmapOnlyMode;
   const methanePlumeDataset = useMemo(
     () =>
       resultsPageMode
@@ -601,6 +610,14 @@ export function Map({
       visibleDroneIdSet,
     ],
   );
+  const rawTracePointCount = resolvedTraceDataset?.features?.length || 0;
+  const renderedTracePointCount = displayedTraceDataset?.features?.length || 0;
+  const traceReductionPercent = rawTracePointCount
+    ? Math.max(
+        0,
+        Math.round((1 - renderedTracePointCount / rawTracePointCount) * 100),
+      )
+    : 0;
   const flightPathDataset = useMemo(
     () =>
       resultsPageMode
@@ -667,10 +684,15 @@ export function Map({
     longitude: initialTraceCenter.longitude,
   });
   const initialPlumeViewEnabledRef = useRef(plumeViewEnabled);
+  const initialHeatmapOnlyModeRef = useRef(heatmapOnlyMode);
 
   useEffect(() => {
     onPlumeViewAutoChangeRef.current = onPlumeViewAutoChange;
   }, [onPlumeViewAutoChange]);
+
+  useEffect(() => {
+    onViewportChangeRef.current = onViewportChange;
+  }, [onViewportChange]);
 
   const handleLimitChange = (limitType, rawValue) => {
     const nextValue = rawValue.replace(",", ".");
@@ -759,7 +781,26 @@ export function Map({
 
     map.addControl(new mapboxgl.NavigationControl(), "top-right");
 
+    const emitViewport = () => {
+      const bounds = map.getBounds();
+      if (!bounds) {
+        return;
+      }
+
+      onViewportChangeRef.current?.({
+        zoom: map.getZoom(),
+        minLatitude: bounds.getSouth(),
+        maxLatitude: bounds.getNorth(),
+        minLongitude: bounds.getWest(),
+        maxLongitude: bounds.getEast(),
+      });
+    };
+
+    map.on("moveend", emitViewport);
+
     map.on("load", () => {
+      setIsStyleReady(true);
+      emitViewport();
       if (!isOnlineMode && !resultsPageMode) {
         map.fitBounds([offlineCoordinates[3], offlineCoordinates[1]], {
           duration: 0,
@@ -835,6 +876,8 @@ export function Map({
             ? heatmapEnabled
               ? 0.78 * safeTraceOpacity
               : 0
+            : initialHeatmapOnlyModeRef.current
+              ? 0.9 * safeTraceOpacity
             : plumeViewEnabled
               ? heatmapEnabled
                 ? 0.2 * safeTraceOpacity
@@ -864,9 +907,13 @@ export function Map({
           ],
           "circle-stroke-width": 0.9,
           "circle-stroke-color": "rgba(255,255,255,0.72)",
-          "circle-stroke-opacity": 0.72 * safeTraceOpacity,
+          "circle-stroke-opacity": initialHeatmapOnlyModeRef.current
+            ? 0
+            : 0.72 * safeTraceOpacity,
           "circle-opacity": resultsPageMode
             ? 0.18 * safeTraceOpacity
+            : initialHeatmapOnlyModeRef.current
+              ? 0
             : plumeViewEnabled
               ? 0.15 * safeTraceOpacity
               : 0.88 * safeTraceOpacity,
@@ -892,9 +939,13 @@ export function Map({
           ),
           "circle-stroke-width": 1,
           "circle-stroke-color": "rgba(255,255,255,0.9)",
-          "circle-stroke-opacity": 0.9 * safeTraceOpacity,
+          "circle-stroke-opacity": initialHeatmapOnlyModeRef.current
+            ? 0
+            : 0.9 * safeTraceOpacity,
           "circle-opacity": resultsPageMode
             ? 0.95 * safeTraceOpacity
+            : initialHeatmapOnlyModeRef.current
+              ? 0
             : plumeViewEnabled
               ? 0.15 * safeTraceOpacity
               : 0.8 * safeTraceOpacity,
@@ -923,6 +974,8 @@ export function Map({
             ? heatmapEnabled
               ? 0.46 * safeTraceOpacity
               : 0
+            : initialHeatmapOnlyModeRef.current
+              ? 0
             : plumeViewEnabled
               ? heatmapEnabled
                 ? 0.1 * safeTraceOpacity
@@ -1188,10 +1241,61 @@ export function Map({
       primaryMarkerRef.current = null;
       startPointMarkerRef.current?.remove();
       startPointMarkerRef.current = null;
+      map.off("moveend", emitViewport);
+      setIsStyleReady(false);
       map.remove();
       mapRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const currentMap = mapRef.current;
+
+    if (!currentMap || !isStyleReady) {
+      return;
+    }
+
+    // Always do a full remove → add cycle to avoid stale source/layer state.
+    if (currentMap.getLayer(ORTHOPHOTO_LAYER_ID)) {
+      currentMap.removeLayer(ORTHOPHOTO_LAYER_ID);
+    }
+    if (currentMap.getSource(ORTHOPHOTO_SOURCE_ID)) {
+      currentMap.removeSource(ORTHOPHOTO_SOURCE_ID);
+    }
+
+    const hasOverlay =
+      orthophotoOverlay?.imageUrl &&
+      Array.isArray(orthophotoOverlay.coordinates) &&
+      orthophotoOverlay.coordinates.length === 4;
+
+    if (!hasOverlay) {
+      return;
+    }
+
+    currentMap.addSource(ORTHOPHOTO_SOURCE_ID, {
+      type: "image",
+      url: orthophotoOverlay.imageUrl,
+      coordinates: orthophotoOverlay.coordinates,
+    });
+
+    // Insert BEFORE the heatmap so trace points render on top.
+    const beforeLayer = currentMap.getLayer("methane-trace-heatmap")
+      ? "methane-trace-heatmap"
+      : undefined;
+
+    currentMap.addLayer(
+      {
+        id: ORTHOPHOTO_LAYER_ID,
+        type: "raster",
+        source: ORTHOPHOTO_SOURCE_ID,
+        paint: {
+          "raster-opacity": 0.88,
+          "raster-fade-duration": 0,
+        },
+      },
+      beforeLayer,
+    );
+  }, [isStyleReady, orthophotoOverlay]);
 
   useEffect(() => {
     const currentMap = mapRef.current;
@@ -1347,7 +1451,7 @@ export function Map({
     const applySourceUpdate = () => {
       const activeMap = mapRef.current;
       const methaneSource = activeMap?.getSource("methane-traces");
-      const notifyTraceRenderComplete = () => {
+      const notifyTraceRenderComplete = (startedAtMs) => {
         if (!resultsPageMode || typeof onTraceRenderComplete !== "function") {
           return;
         }
@@ -1364,6 +1468,11 @@ export function Map({
           }
 
           callbackInvoked = true;
+          if (Number.isFinite(startedAtMs)) {
+            setLastTraceRenderMs(
+              Math.max(0, Math.round(performance.now() - startedAtMs)),
+            );
+          }
           onTraceRenderComplete();
         };
 
@@ -1377,6 +1486,8 @@ export function Map({
         activeMap.once("idle", invokeOnce);
       };
 
+      const startedAtMs = performance.now();
+
       if (methaneSource) {
         methaneSource.setData(displayedTraceDataset);
 
@@ -1388,9 +1499,9 @@ export function Map({
           });
         }
 
-        notifyTraceRenderComplete();
+        notifyTraceRenderComplete(startedAtMs);
       } else {
-        notifyTraceRenderComplete();
+        notifyTraceRenderComplete(startedAtMs);
       }
 
       const plumeSource = activeMap?.getSource("methane-plume");
@@ -1481,6 +1592,8 @@ export function Map({
       ? heatmapEnabled
         ? 0.78 * safeTraceOpacity
         : 0
+      : isHeatmapOnlyActive
+        ? 0.9 * safeTraceOpacity
       : plumeViewEnabled
         ? heatmapEnabled
           ? 0.2 * safeTraceOpacity
@@ -1488,20 +1601,30 @@ export function Map({
         : 0;
     const targetZeroOpacity = resultsPageMode
       ? 0.18 * safeTraceOpacity
+      : isHeatmapOnlyActive
+        ? 0
       : plumeViewEnabled
         ? 0.15 * safeTraceOpacity
         : 0.88 * safeTraceOpacity;
-    const targetZeroStrokeOpacity = 0.72 * safeTraceOpacity;
+    const targetZeroStrokeOpacity = isHeatmapOnlyActive
+      ? 0
+      : 0.72 * safeTraceOpacity;
     const targetHotspotOpacity = resultsPageMode
       ? 0.95 * safeTraceOpacity
+      : isHeatmapOnlyActive
+        ? 0
       : plumeViewEnabled
         ? 0.15 * safeTraceOpacity
         : 0.8 * safeTraceOpacity;
-    const targetHotspotStrokeOpacity = 0.9 * safeTraceOpacity;
+    const targetHotspotStrokeOpacity = isHeatmapOnlyActive
+      ? 0
+      : 0.9 * safeTraceOpacity;
     const targetHaloOpacity = resultsPageMode
       ? heatmapEnabled
         ? 0.46 * safeTraceOpacity
         : 0
+      : isHeatmapOnlyActive
+        ? 0
       : plumeViewEnabled
         ? heatmapEnabled
           ? 0.1 * safeTraceOpacity
@@ -1607,6 +1730,7 @@ export function Map({
     };
   }, [
     heatmapEnabled,
+    isHeatmapOnlyActive,
     mapMode,
     plumeViewEnabled,
     resultsPageMode,
@@ -2481,6 +2605,19 @@ export function Map({
             {mapMode}
           </div>
         </div>
+        {resultsPageMode ? (
+          <div
+            className="my-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs"
+            style={{ color: color.textMuted }}
+          >
+            <span>raw: {rawTracePointCount.toLocaleString()}</span>
+            <span>rendered: {renderedTracePointCount.toLocaleString()}</span>
+            <span>reduction: {traceReductionPercent}%</span>
+            <span>
+              last render: {Number.isFinite(lastTraceRenderMs) ? `${lastTraceRenderMs} ms` : "-"}
+            </span>
+          </div>
+        ) : null}
         <div className="flex items-stretch gap-2">
           <div
             ref={mapContainerRef}

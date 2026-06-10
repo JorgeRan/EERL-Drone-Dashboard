@@ -3,7 +3,9 @@
   "scripts": {
     "start": "node MQTT-broker.js",
     "dev": "node MQTT-broker.js",
+    "dev:optimized": "node --max-old-space-size=2048 --max-semi-space-size=64 --heapsnapshot-near-heap-limit=2 --expose-gc MQTT-broker.js",
     "simulate": "node simulate-telemetry.js",
+    "simulate:optimized": "node --max-old-space-size=1024 --max-semi-space-size=32 --heapsnapshot-near-heap-limit=2 --expose-gc simulate-telemetry.js",
     "simulate:aeris": "node simulate-aeris-rf.js"
   },
   "dependencies": {
