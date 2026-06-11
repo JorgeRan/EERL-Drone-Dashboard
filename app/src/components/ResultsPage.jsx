@@ -3898,11 +3898,14 @@ export function ResultsPage({
                         "linear-gradient(150deg, rgba(106, 214, 194, 0.24) 0%, rgba(106, 214, 194, 0.08) 45%, rgba(8, 15, 17, 0.6) 100%)",
                     }}
                   >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.teal}}>
+                      .csv
+                    </div>
                     <p
                       className="mt-1 text-sm font-semibold"
                       style={{ color: "#ffffff" }}
                     >
-                      Spreadsheet (.csv)
+                      Spreadsheet
                     </p>
                   </button>
 
@@ -3916,11 +3919,14 @@ export function ResultsPage({
                     }}
                     onClick={handleExportGeoJSON}
                   >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.blue }}>
+                      .geojson
+                    </div>
                     <p
                       className="mt-1 text-sm font-semibold"
                       style={{ color: "#ffffff" }}
                     >
-                      GeoJSON (.geojson)
+                      GeoJSON
                     </p>
                   </button>
 
@@ -3936,11 +3942,14 @@ export function ResultsPage({
                       void handleExportKMZ();
                     }}
                   >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.orange }}>
+                      .kmz
+                    </div>
                     <p
                       className="mt-1 text-sm font-semibold"
                       style={{ color: "#ffffff" }}
                     >
-                      Google Earth (.kmz)
+                      Google Earth
                     </p>
                   </button>
                 </div>

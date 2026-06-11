@@ -271,6 +271,22 @@ const getTraceMaxMethane = (dataset) => {
     return max;
 };
 
+const getTraceMaxMethaneFromPoints = (points) => {
+    if (!Array.isArray(points) || points.length === 0) {
+        return 5;
+    }
+
+    let max = 5;
+    for (const point of points) {
+        const value = Number(point?.methane);
+        if (Number.isFinite(value) && value > max) {
+            max = value;
+        }
+    }
+
+    return max;
+};
+
 const buildPlumeColumnData = (tracePoints) => (Array.isArray(tracePoints) ? tracePoints : [])
     .filter((point) => Number(point?.methane ?? 0) > 0)
     .filter((point) => Number.isFinite(point?.longitude) && Number.isFinite(point?.latitude))
@@ -460,10 +476,12 @@ export function DeckMap({
     const traceSourceUpdateTimeoutRef = useRef(null);
     const plumeModeFromTiltRef = useRef(plumeViewEnabled);
     const mapMode = shouldUseOnlineMap(mapboxToken) ? "online" : "offline";
-    const datasetMaxMethane = getTraceMaxMethane(
-        tracePoints && tracePoints.length
-            ? { features: tracePoints.map((point) => ({ properties: { methane: point.methane } })) }
-            : traceDataset,
+    const datasetMaxMethane = useMemo(
+        () =>
+            tracePoints && tracePoints.length
+                ? getTraceMaxMethaneFromPoints(tracePoints)
+                : getTraceMaxMethane(traceDataset),
+        [traceDataset, tracePoints],
     );
     const initialMapSetupRef = useRef(null);
     const [upperLimit, setUpperLimit] = useState(datasetMaxMethane);

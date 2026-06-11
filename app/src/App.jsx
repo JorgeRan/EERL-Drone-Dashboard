@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Messages } from "primereact/messages";
 import "primereact/resources/themes/lara-light-indigo/theme.css";
 import "primereact/resources/primereact.min.css";
@@ -15,9 +15,6 @@ import { MissionModal } from "./components/MissionModal";
 import {DeckMap} from "./components/DeckMap";
 import { Map } from "./components/Map";
 import { buildDeckTracePointsFromFlowData } from "./shared/deckTraceData";
-// import {
-//   flowChartData,
-// } from "./data/methaneTraceData";
 import {
   calculateDistanceMeters,
   extractTelemetryMetrics,
@@ -432,6 +429,7 @@ const buildCombinedFlowDataForDrones = ({
   liveTelemetryByDrone,
   recordedFlowDataByDrone,
   visibleDroneIds,
+  maxTotalPoints = null,
 }) => {
   const visibleIdSet = new Set(
     (Array.isArray(visibleDroneIds) ? visibleDroneIds : [])
@@ -439,38 +437,65 @@ const buildCombinedFlowDataForDrones = ({
       .filter(Boolean),
   );
 
-  return devices
-    .filter((device) => visibleIdSet.has(device.id))
-    .flatMap((device) => {
-      const measurementSeries = measurementTraceByDrone[device.id] || [];
-      const liveSeries = liveTelemetryByDrone[device.id] || [];
-      const recordedSeries = recordedFlowDataByDrone[device.id] || [];
-      const activeSeries = measurementSeries.length
-        ? measurementSeries
-        : liveSeries.length
-          ? liveSeries
-          : recordedSeries;
+  const visibleDevices = devices.filter((device) => visibleIdSet.has(device.id));
+  if (!visibleDevices.length) {
+    return [];
+  }
 
-      return activeSeries.map((point) => ({
-        ...point,
-        droneId: point.droneId || device.id,
-      }));
-    })
-    .sort((left, right) => left.timestampMs - right.timestampMs)
-    .map((point, index) => ({
-      ...point,
-      sampleOrder: index,
-      sampleIndex: index + 1,
-    }));
+  const maxPointsPerDrone = Number.isFinite(maxTotalPoints)
+    ? Math.max(1, Math.floor(maxTotalPoints / visibleDevices.length))
+    : null;
+
+  const combined = [];
+
+  visibleDevices.forEach((device) => {
+    const measurementSeries = measurementTraceByDrone[device.id] || [];
+    const liveSeries = liveTelemetryByDrone[device.id] || [];
+    const recordedSeries = recordedFlowDataByDrone[device.id] || [];
+    const activeSeries = measurementSeries.length
+      ? measurementSeries
+      : liveSeries.length
+        ? liveSeries
+        : recordedSeries;
+
+    if (!activeSeries.length) {
+      return;
+    }
+
+    const startIndex =
+      maxPointsPerDrone !== null && activeSeries.length > maxPointsPerDrone
+        ? activeSeries.length - maxPointsPerDrone
+        : 0;
+
+    for (let index = startIndex; index < activeSeries.length; index += 1) {
+      const point = activeSeries[index];
+      if (!point) {
+        continue;
+      }
+
+      if (!point.droneId) {
+        combined.push({
+          ...point,
+          droneId: device.id,
+        });
+        continue;
+      }
+
+      combined.push(point);
+    }
+  });
+
+  return combined;
 };
 
 const HOLD_DELAY = 2000;
 const MOVEMENT_THRESHOLD_METERS = 1.5;
 const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
 const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
-const TELEMETRY_FLUSH_INTERVAL_MS = 120;
-const LIVE_TELEMETRY_RENDER_LIMIT = null;
+const TELEMETRY_FLUSH_INTERVAL_MS = 10000;
+const LIVE_TELEMETRY_RENDER_LIMIT = 100000;
 const MEASUREMENT_TRACE_STORAGE_LIMIT = 120000;
+const DASHBOARD_MAP_SOURCE_POINT_LIMIT = 100000;
 const DASHBOARD_START_POINT_FILTER_DEFAULT_RADIUS_METERS = 25;
 
 const toDashboardMapTracePoint = (point) => ({
@@ -610,10 +635,51 @@ function App() {
       ),
     [liveFlowData, methaneValidityVisibility],
   );
-  // const dashboardChartFlowData = useMemo(
-  //   () => limitSeriesToTail(filteredLiveFlowData, DASHBOARD_CHART_POINT_LIMIT),
-  //   [filteredLiveFlowData],
-  // );
+  const dashboardChartFlowData = useMemo(
+    () => filteredLiveFlowData,
+    [filteredLiveFlowData],
+  );
+  const [selectedWindow, setSelectedWindow] = useState({
+    startIndex: 0,
+    endIndex: 1,
+    ppmMin: 0,
+    ppmMax: 1,
+  });
+  const selectedWindowForDashboard = useMemo(() => {
+    const dataLength = dashboardChartFlowData.length;
+    const maxPpm = Math.max(
+      1,
+      ...dashboardChartFlowData.map((point) =>
+        Math.max(Number(point?.methane) || 0, Number(point?.purway) || 0),
+      ),
+    );
+
+    if (dataLength <= 1) {
+      return {
+        startIndex: 0,
+        endIndex: 1,
+        ppmMin: 0,
+        ppmMax: maxPpm,
+      };
+    }
+
+    const safeStart = Math.max(0, Math.min(selectedWindow.startIndex ?? 0, dataLength - 2));
+    const safeEnd = Math.max(
+      safeStart + 1,
+      Math.min(selectedWindow.endIndex ?? dataLength - 1, dataLength - 1),
+    );
+
+    return {
+      startIndex: safeStart,
+      endIndex: safeEnd,
+      ppmMin: 0,
+      ppmMax: maxPpm,
+    };
+  }, [dashboardChartFlowData, selectedWindow]);
+  const windSamples = useMemo(
+    () => dashboardChartFlowData,
+    [dashboardChartFlowData],
+  );
 
   useEffect(() => {
     let isCancelled = false;
@@ -891,14 +957,19 @@ function App() {
       .filter((device) => dashboardDroneVisibility[device.id] !== false)
       .map((device) => device.id);
   }, [dashboardDroneVisibility, showDashboardPlotData]);
-  const dashboardMapTracePoints = useMemo(
+  const dashboardMapTracePointsImmediate = useMemo(
     () => {
+      if (currentView !== "dashboard") {
+        return [];
+      }
+
       const combinedFlowData = buildCombinedFlowDataForDrones({
         devices,
         measurementTraceByDrone,
         liveTelemetryByDrone,
         recordedFlowDataByDrone,
         visibleDroneIds: visibleDashboardDroneIds,
+        maxTotalPoints: DASHBOARD_MAP_SOURCE_POINT_LIMIT,
       });
       const methaneFilteredFlowData = combinedFlowData.filter((point) =>
         shouldIncludeMethaneValidity(point, methaneValidityVisibility),
@@ -916,6 +987,7 @@ function App() {
       ).map(toDashboardMapTracePoint);
     },
     [
+      currentView,
       measurementTraceByDrone,
       liveTelemetryByDrone,
       recordedFlowDataByDrone,
@@ -925,6 +997,10 @@ function App() {
       startPointFilterEnabled,
       startPointFilterRadiusMeters,
     ],
+  );
+
+  const dashboardMapTracePoints = useDeferredValue(
+    dashboardMapTracePointsImmediate,
   );
 
   
@@ -1608,6 +1684,17 @@ function App() {
                         >
                           Alt {Number(activePoint?.altitude ?? 0).toFixed(1)} m
                         </span>
+                        <span
+                          className="rounded-full px-3 py-1 font-mono"
+                          style={{
+                            backgroundColor: color.surface,
+                            color: color.textMuted,
+                            border: `1px solid ${color.border}`,
+                          }}
+                          title="Live sample count (debug)"
+                        >
+                          {filteredLiveFlowData.length.toLocaleString()} samples
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -1696,10 +1783,10 @@ function App() {
                   onPlumeViewAutoChange={setPlumeViewEnabled}
                 />
               </div>
-              {/* {selectedDeviceId === "Aeris" ? (
+              {selectedDeviceId === "Aeris" ? (
                 <AerisPanel
                   flowData={dashboardChartFlowData}
-                  selection={selectedWindow}
+                  selection={selectedWindowForDashboard}
                   onSelectionChange={setSelectedWindow}
                   resultsPageMode={false}
                 />
@@ -1707,13 +1794,13 @@ function App() {
                 <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]">
                   <MethanePanel
                     flowData={dashboardChartFlowData}
-                    selection={selectedWindow}
+                    selection={selectedWindowForDashboard}
                     onSelectionChange={setSelectedWindow}
                     resultsPageMode={false}
                   />
                   <WindPanel windSamples={windSamples} />
                 </div>
-              )} */}
+              )}
               
             </div>
           </div>

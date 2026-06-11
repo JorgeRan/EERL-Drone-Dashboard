@@ -41,4 +41,5 @@ export const color = {
   saveGreen: '#45b954',
   blue: '#6ab2ff',
   fligthpathOrange: '#ff3c00',
+  teal: '#008080',
 }

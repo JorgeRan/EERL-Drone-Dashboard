@@ -1,15 +1,6 @@
-import React, { useEffect, useId, useMemo, useRef } from "react";
-import {
-  Area,
-  AreaChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceArea,
-} from "recharts";
+import React, { useEffect, useMemo, useRef } from "react";
+import uPlot from "uplot";
+import "uplot/dist/uPlot.min.css";
 import { color } from "../constants/tailwind";
 
 const seriesTheme = {
@@ -34,18 +25,221 @@ const chartFrame = {
   right: 52,
 };
 
-const formatTooltipValue = (value) => {
-  if (value === null || value === undefined) {
-    return "--";
+const CHART_HEIGHT_PX = 360;
+const MIN_SAMPLES_PER_BUCKET = 2;
+
+function buildMinMaxDownsampledData(rawData, targetBucketCount) {
+  const x = rawData?.[0] ?? [];
+  const left = rawData?.[1] ?? [];
+  const right = rawData?.[2] ?? [];
+  const length = x.length;
+
+  if (length <= 2 || targetBucketCount <= 0 || length <= targetBucketCount * 2) {
+    return rawData;
   }
 
-  if (typeof value === "string" && value.trim() === "") {
-    return "--";
+  const bucketSize = Math.max(MIN_SAMPLES_PER_BUCKET, Math.floor(length / targetBucketCount));
+  const sampledX = [x[0]];
+  const sampledLeft = [left[0]];
+  const sampledRight = [right[0]];
+
+  let bucketStart = 1;
+  while (bucketStart < length - 1) {
+    const bucketEnd = Math.min(length - 1, bucketStart + bucketSize);
+
+    let minLeftIndex = bucketStart;
+    let maxLeftIndex = bucketStart;
+    let minRightIndex = bucketStart;
+    let maxRightIndex = bucketStart;
+
+    for (let index = bucketStart + 1; index < bucketEnd; index += 1) {
+      if ((left[index] ?? 0) < (left[minLeftIndex] ?? 0)) {
+        minLeftIndex = index;
+      }
+      if ((left[index] ?? 0) > (left[maxLeftIndex] ?? 0)) {
+        maxLeftIndex = index;
+      }
+      if ((right[index] ?? 0) < (right[minRightIndex] ?? 0)) {
+        minRightIndex = index;
+      }
+      if ((right[index] ?? 0) > (right[maxRightIndex] ?? 0)) {
+        maxRightIndex = index;
+      }
+    }
+
+    const indices = Array.from(
+      new Set([minLeftIndex, maxLeftIndex, minRightIndex, maxRightIndex]),
+    ).sort((a, b) => a - b);
+
+    for (const index of indices) {
+      sampledX.push(x[index]);
+      sampledLeft.push(left[index]);
+      sampledRight.push(right[index]);
+    }
+
+    bucketStart = bucketEnd;
   }
 
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed.toFixed(2) : "--";
-};
+  sampledX.push(x[length - 1]);
+  sampledLeft.push(left[length - 1]);
+  sampledRight.push(right[length - 1]);
+
+  return [sampledX, sampledLeft, sampledRight];
+}
+
+function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }) {
+  const hostRef = useRef(null);
+  const plotRef = useRef(null);
+
+  const rawChartData = useMemo(() => {
+    const length = flowData.length;
+    const xValues = new Array(length);
+    const purwayValues = new Array(length);
+    const snifferValues = new Array(length);
+
+    for (let index = 0; index < length; index += 1) {
+      const point = flowData[index] ?? {};
+      xValues[index] = index;
+      purwayValues[index] = Number(point.purway) || 0;
+      snifferValues[index] = Number(point.sniffer) || 0;
+    }
+
+    return [xValues, purwayValues, snifferValues];
+  }, [flowData]);
+
+  const getChartDataForWidth = useMemo(() => {
+    return (width) => {
+      const bucketCount = Math.max(100, Math.floor(width));
+      return buildMinMaxDownsampledData(rawChartData, bucketCount);
+    };
+  }, [rawChartData]);
+
+  const xAxisFormatter = useMemo(() => {
+    return (_plot, rawSplits) =>
+      rawSplits.map((value) => {
+        const safeIndex = Math.max(
+          0,
+          Math.min(flowData.length - 1, Math.round(Number(value) || 0)),
+        );
+        return flowData[safeIndex]?.time ?? "";
+      });
+  }, [flowData]);
+
+  useEffect(() => {
+    if (!hostRef.current) {
+      return undefined;
+    }
+
+    const hostElement = hostRef.current;
+
+    const mountPlot = () => {
+      const width = Math.max(320, Math.floor(hostElement.clientWidth));
+      const chartData = getChartDataForWidth(width);
+
+      const options = {
+        width,
+        height: CHART_HEIGHT_PX,
+        legend: { show: false },
+        cursor: {
+          drag: {
+            setScale: false,
+            x: false,
+            y: false,
+          },
+        },
+        scales: {
+          x: {
+            time: false,
+          },
+          left: {
+            range: [0, Math.max(1, leftAxisPeakValue)],
+          },
+          right: {
+            range: [0, Math.max(1, rightAxisPeakValue)],
+          },
+        },
+        axes: [
+          {
+            scale: "x",
+            stroke: color.textDim,
+            grid: { stroke: color.borderStrong },
+            values: xAxisFormatter,
+            size: 26,
+            gap: 10,
+          },
+          {
+            scale: "left",
+            stroke: color.textDim,
+            grid: { stroke: color.borderStrong },
+            values: (_plot, rawSplits) =>
+              rawSplits.map((value) => Number(value).toFixed(0)),
+            size: 44,
+            gap: 10,
+          },
+          {
+            scale: "right",
+            side: 1,
+            stroke: seriesTheme.sniffer.stroke,
+            grid: { show: false },
+            values: (_plot, rawSplits) =>
+              rawSplits.map((value) => Number(value).toFixed(0)),
+            size: 44,
+            gap: 10,
+          },
+        ],
+        series: [
+          {},
+          {
+            label: "Purway",
+            scale: "left",
+            stroke: seriesTheme.purway.stroke,
+            width: 2,
+            points: { show: false },
+          },
+          {
+            label: "Sniffer",
+            scale: "right",
+            stroke: seriesTheme.sniffer.stroke,
+            width: 2,
+            points: { show: false },
+          },
+        ],
+      };
+
+      if (plotRef.current) {
+        plotRef.current.destroy();
+      }
+
+      plotRef.current = new uPlot(options, chartData, hostElement);
+    };
+
+    mountPlot();
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (!plotRef.current || !hostRef.current) {
+        return;
+      }
+      const width = Math.max(320, Math.floor(hostRef.current.clientWidth));
+      const chartData = getChartDataForWidth(width);
+      plotRef.current.setData(chartData, false);
+      plotRef.current.setSize({
+        width,
+        height: CHART_HEIGHT_PX,
+      });
+    });
+    resizeObserver.observe(hostElement);
+
+    return () => {
+      resizeObserver.disconnect();
+      if (plotRef.current) {
+        plotRef.current.destroy();
+        plotRef.current = null;
+      }
+    };
+  }, [getChartDataForWidth, leftAxisPeakValue, rightAxisPeakValue, xAxisFormatter]);
+
+  return <div ref={hostRef} className="h-[360px] w-full min-w-0 overflow-hidden" />;
+}
 
 function formatDuration(durationMs) {
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
@@ -103,7 +297,6 @@ function clampSelection(selection, dataLength, maxPpm) {
 }
 
 export function FlowChart({ flowData, selection, onSelectionChange, resultsPageMode, onRenderComplete }) {
-  const chartId = useId().replace(/:/g, "");
   const chartContainerRef = useRef(null);
   const navigatorRef = useRef(null);
   const ppmRangeRef = useRef(null);
@@ -476,171 +669,11 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
           </div>
         </div>
 
-        <div className="h-[360px] w-full min-w-0">
-          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={360}>
-            <AreaChart
-              data={flowData}
-              margin={{ top: 8, right: 6, left: 8, bottom: 18 }}
-            >
-              <defs>
-                {Object.entries(seriesTheme).map(([sensorKey, theme]) => (
-                  <linearGradient
-                    key={sensorKey}
-                    id={`flowGradient-${chartId}-${sensorKey}`}
-                    x1="0"
-                    y1="0"
-                    x2="0"
-                    y2="1"
-                  >
-                    <stop
-                      offset="0%"
-                      stopColor={theme.fill}
-                      stopOpacity={0.95}
-                    />
-                    <stop
-                      offset="70%"
-                      stopColor={theme.fill}
-                      stopOpacity={0.34}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={theme.fill}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
-                ))}
-              </defs>
-              <CartesianGrid
-                strokeDasharray="4 4"
-                stroke={color.borderStrong}
-                vertical={false}
-              />
-              <XAxis
-                dataKey="time"
-                stroke={color.textDim}
-                style={{ fontSize: "11px" }}
-                tickLine={false}
-                axisLine={false}
-                minTickGap={24}
-              />
-              <YAxis
-                yAxisId="left"
-                stroke={color.textDim}
-                tickLine={false}
-                axisLine={{ stroke: color.borderStrong }}
-                width={44}
-                style={{ fontSize: "11px" }}
-                domain={[0, leftAxisPeakValue]}
-                ticks={leftAxisTicks}
-                tick={{ fill: color.text, fontSize: 11 }}
-                label={{
-                  value: "Trace",
-                  angle: -90,
-                  position: "insideLeft",
-                  offset: 0,
-                  fill: color.text,
-                  fontSize: 11,
-                }}
-              />
-              <YAxis
-                yAxisId="right"
-                orientation="right"
-                stroke={seriesTheme.sniffer.stroke}
-                tickLine={false}
-                axisLine={{ stroke: color.borderStrong }}
-                width={44}
-                style={{ fontSize: "11px" }}
-                domain={[0, rightAxisPeakValue]}
-                ticks={rightAxisTicks}
-                tick={{ fill: seriesTheme.sniffer.stroke, fontSize: 11 }}
-                label={{
-                  value: "Sniffer",
-                  angle: 90,
-                  position: "insideRight",
-                  offset: 0,
-                  fill: seriesTheme.sniffer.stroke,
-                  fontSize: 11,
-                }}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: color.surface,
-                  border: `1px solid ${color.borderStrong}`,
-                  borderRadius: "8px",
-                  color: color.text,
-                }}
-                labelFormatter={(value, payload) => {
-                  const point = payload?.[0]?.payload;
-                  return point?.timestampIso ?? value;
-                }}
-                formatter={(value) => formatTooltipValue(value)}
-                labelStyle={{ color: color.text }}
-              />
-              {safeSelection.startIndex > 0 ? (
-                <ReferenceArea
-                  x1={flowData[0]?.time}
-                  x2={flowData[safeSelection.startIndex]?.time}
-                  fill="rgba(3, 7, 18, 0.62)"
-                  ifOverflow="extendDomain"
-                />
-              ) : null}
-              {safeSelection.endIndex < maxIndex ? (
-                <ReferenceArea
-                  x1={flowData[safeSelection.endIndex]?.time}
-                  x2={flowData[maxIndex]?.time}
-                  fill="rgba(3, 7, 18, 0.62)"
-                  ifOverflow="extendDomain"
-                />
-              ) : null}
-              {safeSelection.ppmMin > 0 ? (
-                <ReferenceArea
-                  y1={0}
-                  y2={safeSelection.ppmMin}
-                  fill="rgba(3, 7, 18, 0.44)"
-                  ifOverflow="extendDomain"
-                />
-              ) : null}
-              {safeSelection.ppmMax < leftAxisPeakValue ? (
-                <ReferenceArea
-                  y1={safeSelection.ppmMax}
-                  y2={leftAxisPeakValue}
-                  fill="rgba(3, 7, 18, 0.44)"
-                  ifOverflow="extendDomain"
-                />
-              ) : null}
-              {Object.entries(seriesTheme).map(([sensorKey, theme]) => {
-                const dataKey = sensorKey;
-                const yAxisId = sensorKey === "sniffer" ? "right" : "left";
-
-                return (
-                  <React.Fragment key={sensorKey}>
-                    <Area
-                      yAxisId={yAxisId}
-                      type="monotone"
-                      dataKey={dataKey}
-                      stroke={theme.stroke}
-                      strokeWidth={2.3}
-                      fill={`url(#flowGradient-${chartId}-${sensorKey})`}
-                      fillOpacity={0.18}
-                      isAnimationActive={false}
-                      dot={false}
-                      activeDot={{ r: 4, strokeWidth: 0, fill: theme.stroke }}
-                    />
-                    <Line
-                      yAxisId={yAxisId}
-                      type="monotone"
-                      dataKey={dataKey}
-                      stroke={theme.stroke}
-                      strokeWidth={2.3}
-                      dot={false}
-                      isAnimationActive={false}
-                    />
-                  </React.Fragment>
-                );
-              })}
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
+        <HighVolumeLineChart
+          flowData={flowData}
+          leftAxisPeakValue={leftAxisPeakValue}
+          rightAxisPeakValue={rightAxisPeakValue}
+        />
 
         <div
           className="pointer-events-none absolute top-[72px] bottom-[34px]"
