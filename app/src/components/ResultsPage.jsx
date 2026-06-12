@@ -2185,6 +2185,36 @@ export function ResultsPage({
       return;
     }
 
+    const buildExportTracePoints = (tracePoints) =>
+      tracePoints
+        .map((point, index) => {
+          const sourcePoint = selectedFlowDataForMapWithStartFilter[index] || null;
+          const targetLatitude =
+            toFiniteNumber(sourcePoint?.target_latitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_latitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_position?.latitude);
+          const targetLongitude =
+            toFiniteNumber(sourcePoint?.target_longitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_longitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_position?.longitude);
+          const measuredLatitude = toFiniteNumber(point?.latitude);
+          const measuredLongitude = toFiniteNumber(point?.longitude);
+          const hasTargetCoordinates =
+            targetLatitude !== null && targetLongitude !== null;
+
+          return {
+            ...point,
+            latitude: hasTargetCoordinates ? targetLatitude : measuredLatitude,
+            longitude: hasTargetCoordinates ? targetLongitude : measuredLongitude,
+            coordinateSource: hasTargetCoordinates ? "target" : "measured",
+          };
+        })
+        .filter(
+          (point) =>
+            Number.isFinite(Number(point?.latitude)) &&
+            Number.isFinite(Number(point?.longitude)),
+        );
+
     const { lowerLimit, upperLimit } = legendScale;
     const span = Math.max(upperLimit - lowerLimit, 0.1);
     const heatmapThreshold = lowerLimit + span * 0.04;
@@ -2213,11 +2243,7 @@ export function ResultsPage({
       };
     };
 
-    const exportedTracePoints = tracePointsForMap.filter(
-      (point) =>
-        Number.isFinite(Number(point?.latitude)) &&
-        Number.isFinite(Number(point?.longitude)),
-    );
+    const exportedTracePoints = buildExportTracePoints(tracePointsForMap);
 
     const pointFeatures = exportedTracePoints.map((point) => {
       const traceValue = Number(point?.methane ?? 0);
@@ -2255,6 +2281,7 @@ export function ResultsPage({
           displayMetricUnits: point.displayMetricUnits ?? null,
           sampleIndex: point.sampleIndex ?? null,
           sampleOrder: point.sampleOrder ?? null,
+          coordinateSource: point.coordinateSource ?? "measured",
         },
       };
     });
@@ -2317,12 +2344,48 @@ export function ResultsPage({
     link.download = filename;
     link.click();
     URL.revokeObjectURL(objectUrl);
-  }, [tracePointsForMap, legendScale, selectedMission, selectedResultDroneId]);
+  }, [
+    tracePointsForMap,
+    legendScale,
+    selectedMission,
+    selectedResultDroneId,
+    selectedFlowDataForMapWithStartFilter,
+  ]);
 
   const handleExportKMZ = useCallback(async () => {
     if (!tracePointsForMap.length) {
       return;
     }
+
+    const buildExportTracePoints = (tracePoints) =>
+      tracePoints
+        .map((point, index) => {
+          const sourcePoint = selectedFlowDataForMapWithStartFilter[index] || null;
+          const targetLatitude =
+            toFiniteNumber(sourcePoint?.target_latitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_latitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_position?.latitude);
+          const targetLongitude =
+            toFiniteNumber(sourcePoint?.target_longitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_longitude) ??
+            toFiniteNumber(sourcePoint?.payload?.target_position?.longitude);
+          const measuredLatitude = toFiniteNumber(point?.latitude);
+          const measuredLongitude = toFiniteNumber(point?.longitude);
+          const hasTargetCoordinates =
+            targetLatitude !== null && targetLongitude !== null;
+
+          return {
+            ...point,
+            latitude: hasTargetCoordinates ? targetLatitude : measuredLatitude,
+            longitude: hasTargetCoordinates ? targetLongitude : measuredLongitude,
+            coordinateSource: hasTargetCoordinates ? "target" : "measured",
+          };
+        })
+        .filter(
+          (point) =>
+            Number.isFinite(Number(point?.latitude)) &&
+            Number.isFinite(Number(point?.longitude)),
+        );
 
     const { lowerLimit, upperLimit } = legendScale;
     const span = Math.max(upperLimit - lowerLimit, 0.1);
@@ -2351,25 +2414,17 @@ export function ResultsPage({
       return `${alphaHex}${blue}${green}${red}`;
     };
 
-    const metersToLatitudeDegrees = (meters) => meters / 111320;
-    const metersToLongitudeDegrees = (meters, latitude) =>
-      meters / (111320 * Math.cos((latitude * Math.PI) / 180));
-
-    const buildCircleCoordinates = (longitude, latitude, radiusMeters) => {
-      const segments = 24;
-      const coordinates = [];
-
-      for (let index = 0; index <= segments; index += 1) {
-        const angle = (index / segments) * Math.PI * 2;
-        const latOffset = metersToLatitudeDegrees(radiusMeters * Math.sin(angle));
-        const lonOffset = metersToLongitudeDegrees(
-          radiusMeters * Math.cos(angle),
-          latitude,
-        );
-        coordinates.push(`${longitude + lonOffset},${latitude + latOffset},0`);
+    const hexToRgb = (hexColor) => {
+      const safe = String(hexColor || "").replace("#", "");
+      if (safe.length !== 6) {
+        return { r: 56, g: 189, b: 248 };
       }
 
-      return coordinates.join(" ");
+      return {
+        r: Number.parseInt(safe.slice(0, 2), 16),
+        g: Number.parseInt(safe.slice(2, 4), 16),
+        b: Number.parseInt(safe.slice(4, 6), 16),
+      };
     };
 
     const sanitizeKmzAssetName = (value, fallbackName) =>
@@ -2398,11 +2453,7 @@ export function ResultsPage({
 
     const zip = new JSZip();
 
-    const exportedTracePoints = tracePointsForMap.filter(
-      (point) =>
-        Number.isFinite(Number(point?.latitude)) &&
-        Number.isFinite(Number(point?.longitude)),
-    );
+    const exportedTracePoints = buildExportTracePoints(tracePointsForMap);
 
     if (!exportedTracePoints.length) {
       return;
@@ -2422,7 +2473,7 @@ export function ResultsPage({
         const styleId = `pt-${pointStyleMap.size}`;
         pointStyleMap.set(styleKey, styleId);
         pointStyleDefs.push(
-          `<Style id="${styleId}"><IconStyle><color>${toKmlColor(markerColor, "f0")}</color><scale>0.9</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`,
+          `<Style id="${styleId}"><IconStyle><color>${toKmlColor(markerColor, "70")}</color><scale>0.55</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/shaded_dot.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`,
         );
       }
 
@@ -2442,41 +2493,171 @@ export function ResultsPage({
       .join(" ");
     const pathPlacemark = `<Placemark><name>Mission Path</name><Style><LineStyle><color>ff4ade80</color><width>3</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>${pathCoordinates}</coordinates></LineString></Placemark>`;
 
-    const heatStyleMap = new globalThis.Map();
-    const heatStyleDefs = [];
-    const heatPlacemarks = exportedTracePoints
-      .filter((point) => Number(point?.methane ?? 0) >= heatmapThreshold)
-      .map((point, index) => {
-        const traceValue = Number(point?.methane ?? 0);
-        const normalizedWeight = clamp((traceValue - lowerLimit) / span, 0, 1);
-        const heatColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
-        const radiusMeters = 7 + normalizedWeight * 15;
-        const styleKey = `${heatColor.toLowerCase()}-heat`;
-
-        if (!heatStyleMap.has(styleKey)) {
-          const styleId = `heat-${heatStyleMap.size}`;
-          heatStyleMap.set(styleKey, styleId);
-          heatStyleDefs.push(
-            `<Style id="${styleId}"><LineStyle><color>${toKmlColor(heatColor, "44")}</color><width>1</width></LineStyle><PolyStyle><color>${toKmlColor(heatColor, "66")}</color><fill>1</fill><outline>1</outline></PolyStyle></Style>`,
-          );
-        }
-
-        const styleId = heatStyleMap.get(styleKey);
-        const polygonCoordinates = buildCircleCoordinates(
-          point.longitude,
-          point.latitude,
-          radiusMeters,
-        );
-
-        return `<Placemark><name>Heat ${index + 1}</name><styleUrl>#${styleId}</styleUrl><Polygon><tessellate>2</tessellate><altitudeMode>relativeToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${polygonCoordinates}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`;
-      });
-
     const orthophotoOverlay =
       selectedMissionOrthophoto?.imageUrl &&
       Array.isArray(selectedMissionOrthophoto.coordinates) &&
       selectedMissionOrthophoto.coordinates.length === 4
         ? selectedMissionOrthophoto
         : null;
+
+    const heatmapPoints = exportedTracePoints.filter(
+      (point) => Number(point?.methane ?? 0) >= heatmapThreshold,
+    );
+
+    const determineHeatBounds = () => {
+      if (orthophotoOverlay) {
+        return {
+          west: Number(orthophotoOverlay.coordinates[0]?.[0] ?? -180),
+          north: Number(orthophotoOverlay.coordinates[0]?.[1] ?? 90),
+          east: Number(orthophotoOverlay.coordinates[1]?.[0] ?? 180),
+          south: Number(orthophotoOverlay.coordinates[2]?.[1] ?? -90),
+        };
+      }
+
+      const latitudes = exportedTracePoints.map((point) => Number(point.latitude));
+      const longitudes = exportedTracePoints.map((point) => Number(point.longitude));
+      const minLat = Math.min(...latitudes);
+      const maxLat = Math.max(...latitudes);
+      const minLon = Math.min(...longitudes);
+      const maxLon = Math.max(...longitudes);
+      const latPadding = Math.max((maxLat - minLat) * 0.035, 0.00006);
+      const lonPadding = Math.max((maxLon - minLon) * 0.035, 0.00006);
+
+      return {
+        west: minLon - lonPadding,
+        north: maxLat + latPadding,
+        east: maxLon + lonPadding,
+        south: minLat - latPadding,
+      };
+    };
+
+    const createHeatmapOverlayBlob = async (bounds) => {
+      const lonSpan = Math.max(bounds.east - bounds.west, 1e-9);
+      const latSpan = Math.max(bounds.north - bounds.south, 1e-9);
+      const aspect = clamp(lonSpan / latSpan, 0.45, 2.3);
+      const width = 1400;
+      const height = Math.max(720, Math.min(1800, Math.round(width / aspect)));
+
+      // Keep two accumulators so color reflects methane values, not point density.
+      const pixelCount = width * height;
+      const weightSums = new Float32Array(pixelCount);
+      const methaneSums = new Float32Array(pixelCount);
+
+      for (const point of heatmapPoints) {
+        const traceValue = Number(point?.methane ?? 0);
+        const methaneWeight = clamp((traceValue - lowerLimit) / span, 0, 1);
+        const centerX = ((Number(point.longitude) - bounds.west) / lonSpan) * width;
+        const centerY =
+          (1 - (Number(point.latitude) - bounds.south) / latSpan) *
+          height;
+        const radius = 8 + methaneWeight * 24;
+        const radiusSquared = radius * radius;
+        const baseWeight = 0.35 + methaneWeight * 0.65;
+
+        const minX = Math.max(0, Math.floor(centerX - radius));
+        const maxX = Math.min(width - 1, Math.ceil(centerX + radius));
+        const minY = Math.max(0, Math.floor(centerY - radius));
+        const maxY = Math.min(height - 1, Math.ceil(centerY + radius));
+
+        for (let y = minY; y <= maxY; y += 1) {
+          const dy = y - centerY;
+
+          for (let x = minX; x <= maxX; x += 1) {
+            const dx = x - centerX;
+            const distanceSquared = dx * dx + dy * dy;
+            if (distanceSquared > radiusSquared) {
+              continue;
+            }
+
+            const normalizedDistance = 1 - distanceSquared / radiusSquared;
+            const kernel =
+              normalizedDistance * normalizedDistance * normalizedDistance;
+            const weight = kernel * baseWeight;
+            const pixelIndex = y * width + x;
+
+            weightSums[pixelIndex] += weight;
+            methaneSums[pixelIndex] += weight * traceValue;
+          }
+        }
+      }
+
+      const colorCanvas = document.createElement("canvas");
+      colorCanvas.width = width;
+      colorCanvas.height = height;
+      const colorCtx = colorCanvas.getContext("2d");
+
+      if (!colorCtx) {
+        throw new Error("Unable to create heatmap color canvas.");
+      }
+
+      const densityValues = [];
+      for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+        const density = weightSums[pixelIndex];
+        if (density > 1e-6) {
+          densityValues.push(density);
+        }
+      }
+
+      densityValues.sort((a, b) => a - b);
+      const percentileValue = (p) => {
+        if (!densityValues.length) {
+          return 0;
+        }
+
+        const index = Math.floor((densityValues.length - 1) * p);
+        return densityValues[index];
+      };
+
+      const p15 = percentileValue(0.15);
+      const p97 = percentileValue(0.97);
+      const densityRange = Math.max(p97 - p15, 1e-5);
+
+      const outputImage = colorCtx.createImageData(width, height);
+      for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+        const density = weightSums[pixelIndex];
+        if (density <= 1e-6) {
+          continue;
+        }
+
+        const rgbaIndex = pixelIndex * 4;
+        const methaneAtPixel = methaneSums[pixelIndex] / density;
+        const normalizedDensity = clamp((density - p15) / densityRange, 0, 1);
+
+        const pixelHex = getScaledMethaneColor(
+          methaneAtPixel,
+          lowerLimit,
+          upperLimit,
+        );
+        const pixelRgb = hexToRgb(pixelHex);
+        const alpha = clamp(
+          0.72 + Math.pow(normalizedDensity, 0.8) * 0.28,
+          0,
+          1,
+        );
+
+        outputImage.data[rgbaIndex] = pixelRgb.r;
+        outputImage.data[rgbaIndex + 1] = pixelRgb.g;
+        outputImage.data[rgbaIndex + 2] = pixelRgb.b;
+        outputImage.data[rgbaIndex + 3] = Math.round(alpha * 255);
+      }
+
+      colorCtx.putImageData(outputImage, 0, 0);
+
+      const softenedCanvas = document.createElement("canvas");
+      softenedCanvas.width = width;
+      softenedCanvas.height = height;
+      const softenedCtx = softenedCanvas.getContext("2d");
+
+      if (!softenedCtx) {
+        throw new Error("Unable to create softened heatmap canvas.");
+      }
+
+      softenedCtx.filter = "blur(0.6px)";
+      softenedCtx.drawImage(colorCanvas, 0, 0);
+      softenedCtx.filter = "none";
+
+      return canvasToBlob(softenedCanvas, "image/png");
+    };
 
     let orthophotoAssetName = null;
     if (orthophotoOverlay) {
@@ -2495,6 +2676,18 @@ export function ResultsPage({
       );
       orthophotoAssetName = `images/${assetBaseName}.${mimeTypeToExtension(imageBlob.type)}`;
       zip.file(orthophotoAssetName, imageBlob);
+    }
+
+    const heatBounds = determineHeatBounds();
+    let heatmapAssetName = null;
+    if (heatmapPoints.length) {
+      const heatmapBlob = await createHeatmapOverlayBlob(heatBounds);
+      const heatAssetBaseName = sanitizeKmzAssetName(
+        `${missionLabelRaw}_smooth_heatmap`,
+        "smooth_heatmap",
+      );
+      heatmapAssetName = `images/${heatAssetBaseName}.png`;
+      zip.file(heatmapAssetName, heatmapBlob);
     }
 
     const orthophotoFolder = orthophotoOverlay
@@ -2516,7 +2709,47 @@ export function ResultsPage({
     </Folder>`
       : "";
 
-    const kml = `<?xml version="1.0" encoding="UTF-8"?>
+    const heatmapOverlayFolder = heatmapAssetName
+      ? `<Folder>
+      <name>Smooth Heatmap</name>
+      <GroundOverlay>
+        <name>Telemetry Heatmap</name>
+        <color>f2ffffff</color>
+        <Icon>
+          <href>${xmlEscape(heatmapAssetName)}</href>
+        </Icon>
+        <drawOrder>2</drawOrder>
+        <LatLonBox>
+          <north>${heatBounds.north}</north>
+          <south>${heatBounds.south}</south>
+          <east>${heatBounds.east}</east>
+          <west>${heatBounds.west}</west>
+        </LatLonBox>
+      </GroundOverlay>
+    </Folder>`
+      : "";
+
+//     const kml = `<?xml version="1.0" encoding="UTF-8"?>
+// <kml xmlns="http://www.opengis.net/kml/2.2">
+//   <Document>
+//     <name>${missionLabel}</name>
+//     <description>${xmlEscape(
+//       `Generated by EERL Dashboard. Scale ${lowerLimit.toFixed(2)} to ${upperLimit.toFixed(2)}.`,
+//     )}</description>
+//     ${pointStyleDefs.join("\n    ")}
+//     <Folder>
+//       <name>Mission Path</name>
+//       ${pathPlacemark}
+//     </Folder>
+//     <Folder>
+//       <name>Sample Points</name>
+//       ${pointPlacemarks.join("\n      ")}
+//       </Folder>
+//     ${orthophotoFolder}
+//     ${heatmapOverlayFolder}
+//   </Document>
+// </kml>`;
+const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${missionLabel}</name>
@@ -2524,20 +2757,8 @@ export function ResultsPage({
       `Generated by EERL Dashboard. Scale ${lowerLimit.toFixed(2)} to ${upperLimit.toFixed(2)}.`,
     )}</description>
     ${pointStyleDefs.join("\n    ")}
-    ${heatStyleDefs.join("\n    ")}
-    <Folder>
-      <name>Mission Path</name>
-      ${pathPlacemark}
-    </Folder>
-    <Folder>
-      <name>Sample Points</name>
-      ${pointPlacemarks.join("\n      ")}
-      </Folder>
-    <Folder>
-      <name>Heatmap Footprints</name>
-      ${heatPlacemarks.join("\n      ")}
-    </Folder>
     ${orthophotoFolder}
+    ${heatmapOverlayFolder}
   </Document>
 </kml>`;
 
@@ -2564,7 +2785,13 @@ export function ResultsPage({
     link.download = filename;
     link.click();
     URL.revokeObjectURL(objectUrl);
-  }, [tracePointsForMap, legendScale, selectedMission, selectedResultDroneId]);
+  }, [
+    tracePointsForMap,
+    legendScale,
+    selectedMission,
+    selectedResultDroneId,
+    selectedFlowDataForMapWithStartFilter,
+  ]);
 
   const handleDownloadAnalysis = useCallback(() => {
     if (!analysisImageDataUris.length && !analysisOutputText) {
@@ -3799,7 +4026,7 @@ export function ResultsPage({
               </div>
             ) : null}
 
-            {/* <div
+            <div
               className="relative min-h-[280px] rounded-lg border p-3"
               style={{ backgroundColor: color.card, borderColor: color.border }}
             >
@@ -3851,7 +4078,7 @@ export function ResultsPage({
                   </div>
                 </div>
               ) : null}
-            </div> */}
+            </div> 
 
             {isMissionLoading ? null : (
               <div
