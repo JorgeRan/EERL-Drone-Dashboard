@@ -221,6 +221,37 @@ const isAllDroneSelection = (selectedDroneId) => {
   );
 };
 
+const MAX_LINESTRING_VERTICES = 60000;
+
+const splitCoordinatesIntoSafeSegments = (coordinates) => {
+  const points = Array.isArray(coordinates) ? coordinates : [];
+
+  if (points.length < 2) {
+    return [];
+  }
+
+  if (points.length <= MAX_LINESTRING_VERTICES) {
+    return [points];
+  }
+
+  const segments = [];
+  const step = MAX_LINESTRING_VERTICES - 1;
+
+  for (let startIndex = 0; startIndex < points.length - 1; startIndex += step) {
+    const endExclusive = Math.min(
+      startIndex + MAX_LINESTRING_VERTICES,
+      points.length,
+    );
+    const segment = points.slice(startIndex, endExclusive);
+
+    if (segment.length >= 2) {
+      segments.push(segment);
+    }
+  }
+
+  return segments;
+};
+
 const buildTraceFlightPathFeatureCollection = (traceDataset) => {
   const coordinates = [...(traceDataset?.features || [])]
     .sort(
@@ -252,20 +283,20 @@ const buildTraceFlightPathFeatureCollection = (traceDataset) => {
     return { type: "FeatureCollection", features: [] };
   }
 
+  const coordinateSegments = splitCoordinatesIntoSafeSegments(coordinates);
+
   return {
     type: "FeatureCollection",
-    features: [
-      {
+    features: coordinateSegments.map((segment, segmentIndex) => ({
         type: "Feature",
         geometry: {
           type: "LineString",
-          coordinates,
+          coordinates: segment,
         },
         properties: {
-          id: "trace-flight-path",
+          id: `trace-flight-path-${segmentIndex}`,
         },
-      },
-    ],
+      })),
   };
 };
 
@@ -290,18 +321,20 @@ const buildLiveFlightPathFeatureCollection = (
         ? true
         : showAllDrones || droneId === selectedDroneId;
     })
-    .map(([droneId, coordinates]) => ({
-      type: "Feature",
-      geometry: {
-        type: "LineString",
-        coordinates,
-      },
-      properties: {
-        id: `flight-path-${droneId}`,
-        droneId,
-        pathColor: getDroneColor(droneId),
-      },
-    }));
+    .flatMap(([droneId, coordinates]) =>
+      splitCoordinatesIntoSafeSegments(coordinates).map((segment, segmentIndex) => ({
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: segment,
+        },
+        properties: {
+          id: `flight-path-${droneId}-${segmentIndex}`,
+          droneId,
+          pathColor: getDroneColor(droneId),
+        },
+      })),
+    );
 
   return {
     type: "FeatureCollection",

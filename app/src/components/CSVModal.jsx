@@ -21,7 +21,6 @@ const shouldDisplayTelemetry = (source) => {
     parseNumber(source?.payload?.flight_status) ??
     parseNumber(source?.payload?.flightStatus);
 
-  // Keep telemetry visible when flight_status is missing.
   if (flightStatus === null) {
     return true;
   }
@@ -331,7 +330,7 @@ const parseStandardCsvToMissionResults = (
     return -1;
   };
 
-  const timeIdx = idx("time", "timestamp", "ts");
+  const timeIdx = idx("time", "timestamp", "ts", "Timestamp [yyyy-mm-dd hh:mm:ss.000]");
   const gpsDateIdx = idx("gps_date");
   const gpsTimeIdx = idx("gps_time");
   const methaneIdx = idx("methane_concentration", "methane", "ch4");
@@ -851,9 +850,9 @@ export function CSVImportModal({
       } catch {
         parsedResult = parseCsvToMissionResults(fileText, parserOptions);
       }
-
+      console.log(parsedResult);
       const { missionResults: results, droppedCount } = parsedResult;
-
+      console.log("Parsed mission results:", results, "Dropped coordinate outliers:", droppedCount);
       if (!results) {
         setStatus({
           tone: "error",

@@ -105,6 +105,10 @@ const TELEMETRY_CLUSTER_GRID_DEGREES = Math.max(
   0.0001,
   Number(process.env.TELEMETRY_CLUSTER_GRID_DEGREES || 0.0005),
 );
+const TELEMETRY_HISTORY_MAX_VERTICES = Math.max(
+  1000,
+  Number(process.env.TELEMETRY_HISTORY_MAX_VERTICES || 50000),
+);
 const GC_INTERVAL_MS = Math.max(0, Number(process.env.GC_INTERVAL_MS || 0));
 const GC_MIN_HEAP_USED_MB = Math.max(
   0,
@@ -2942,6 +2946,13 @@ app.get("/api/telemetry/history", async (req, res) => {
   const toDate = parseQueryDate(req.query.to);
   const limit = Math.min(Number(req.query.limit) || 1000, 100000); // Default 1000, max 100000
   const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const maxVertices = Math.min(
+    Math.max(
+      Number(req.query.maxVertices) || TELEMETRY_HISTORY_MAX_VERTICES,
+      1000,
+    ),
+    100000,
+  );
   const minLatitude = Number(req.query.minLatitude);
   const maxLatitude = Number(req.query.maxLatitude);
   const minLongitude = Number(req.query.minLongitude);
@@ -3002,18 +3013,76 @@ app.get("/api/telemetry/history", async (req, res) => {
     }
 
     const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    params.push(maxVertices);
+    const maxVerticesParam = `$${params.length}`;
     params.push(limit);
+    const limitParam = `$${params.length}`;
     params.push(offset);
+    const offsetParam = `$${params.length}`;
+
     const result = await sql.unsafe(
       `
-            SELECT drone_id, topic, ts, latitude, longitude, altitude, target_latitude, target_longitude, methane, sniffer, purway, distance, payload
-            FROM ${TELEMETRY_TABLE}
-            ${whereClause}
+            WITH filtered AS (
+              SELECT
+                drone_id,
+                topic,
+                ts,
+                latitude,
+                longitude,
+                altitude,
+                target_latitude,
+                target_longitude,
+                methane,
+                sniffer,
+                purway,
+                distance,
+                payload
+              FROM ${TELEMETRY_TABLE}
+              ${whereClause}
+            ),
+            ranked AS (
+              SELECT
+                *,
+                ROW_NUMBER() OVER (ORDER BY ts DESC) AS row_number,
+                COUNT(*) OVER () AS total_count
+              FROM filtered
+            ),
+            sampled AS (
+              SELECT
+                *,
+                CASE
+                  WHEN total_count > ${maxVerticesParam}
+                  THEN (total_count + ${maxVerticesParam} - 1) / ${maxVerticesParam}
+                  ELSE 1
+                END AS sample_step
+              FROM ranked
+            )
+            SELECT
+              drone_id,
+              topic,
+              ts,
+              latitude,
+              longitude,
+              altitude,
+              target_latitude,
+              target_longitude,
+              methane,
+              sniffer,
+              purway,
+              distance,
+              payload,
+              total_count,
+              sample_step
+            FROM sampled
+            WHERE ((row_number - 1) % sample_step) = 0
             ORDER BY ts DESC
-            LIMIT $${params.length - 1} OFFSET $${params.length}
+            LIMIT ${limitParam} OFFSET ${offsetParam}
             `,
       params,
     );
+
+    const totalCount = Number(result?.[0]?.total_count || 0);
+    const sampleStep = Math.max(1, Number(result?.[0]?.sample_step || 1));
 
     res.json({
       data: result.map(hydrateTelemetryRow),
@@ -3021,7 +3090,9 @@ app.get("/api/telemetry/history", async (req, res) => {
         limit,
         offset,
         count: result.length,
-        // Optionally, you could add totalCount with a separate COUNT(*) query if needed
+        totalCount,
+        sampleStep,
+        maxVertices,
       },
     });
   } catch (error) {

@@ -2516,10 +2516,23 @@ export function ResultsPage({
 
       const latitudes = exportedTracePoints.map((point) => Number(point.latitude));
       const longitudes = exportedTracePoints.map((point) => Number(point.longitude));
-      const minLat = Math.min(...latitudes);
-      const maxLat = Math.max(...latitudes);
-      const minLon = Math.min(...longitudes);
-      const maxLon = Math.max(...longitudes);
+      // const minLat = Math.min(...latitudes);
+      const minLat = latitudes.reduce(
+        (min, value) => (Number.isFinite(value) ? Math.min(min, value) : min),
+        Infinity,
+      );
+      const maxLat = latitudes.reduce(
+        (max, value) => (Number.isFinite(value) ? Math.max(max, value) : max),
+        -Infinity,
+      );
+      const minLon = longitudes.reduce(
+        (min, value) => (Number.isFinite(value) ? Math.min(min, value) : min),
+        Infinity,
+      );
+      const maxLon = longitudes.reduce(
+        (max, value) => (Number.isFinite(value) ? Math.max(max, value) : max),
+        -Infinity,
+      );
       const latPadding = Math.max((maxLat - minLat) * 0.035, 0.00006);
       const lonPadding = Math.max((maxLon - minLon) * 0.035, 0.00006);
 
@@ -2531,6 +2544,68 @@ export function ResultsPage({
       };
     };
 
+    const createLegendOverlayBlob = async () => {
+      const legendCanvas = document.createElement("canvas");
+      legendCanvas.width = 180;
+      legendCanvas.height = 256;
+      const legendCtx = legendCanvas.getContext("2d");
+
+      if (!legendCtx) {
+        throw new Error("Unable to create legend canvas.");
+      }
+
+      const barX = 20;
+      const barWidth = 22;
+      const barTop = 18;
+      const barBottom = legendCanvas.height - 18;
+      const barHeight = barBottom - barTop;
+      const textX = barX + barWidth + 14;
+      const labelStyle = "12px sans-serif";
+      const textColor = "#1f2937";
+      const shadowColor = "rgba(255, 255, 255, 0.85)";
+
+      legendCtx.clearRect(0, 0, legendCanvas.width, legendCanvas.height);
+      legendCtx.fillStyle = "transparent";
+      legendCtx.fillRect(0, 0, legendCanvas.width, legendCanvas.height);
+
+      const gradient = legendCtx.createLinearGradient(0, barTop, 0, barBottom);
+
+      gradient.addColorStop(0, getScaledMethaneColor(upperLimit, lowerLimit, upperLimit));
+      gradient.addColorStop(0.25, getScaledMethaneColor(upperLimit - span * 0.25, lowerLimit, upperLimit));
+      gradient.addColorStop(0.5, getScaledMethaneColor(upperLimit - span * 0.5, lowerLimit, upperLimit));
+      gradient.addColorStop(0.75, getScaledMethaneColor(upperLimit - span * 0.75, lowerLimit, upperLimit));
+      gradient.addColorStop(1, getScaledMethaneColor(lowerLimit, lowerLimit, upperLimit));
+
+      legendCtx.fillStyle = gradient;
+      legendCtx.fillRect(barX, barTop, barWidth, barHeight);
+      legendCtx.strokeStyle = "rgba(31, 41, 55, 0.25)";
+      legendCtx.strokeRect(barX, barTop, barWidth, barHeight);
+
+      const drawLabel = (text, y) => {
+        legendCtx.font = labelStyle;
+        legendCtx.textBaseline = "middle";
+        legendCtx.lineWidth = 4;
+        legendCtx.strokeStyle = shadowColor;
+        legendCtx.strokeText(text, textX, y);
+        legendCtx.fillStyle = textColor;
+        legendCtx.fillText(text, textX, y);
+      };
+
+      drawLabel(`${upperLimit.toFixed(2)}`, barTop);
+      drawLabel(`${((upperLimit + lowerLimit) / 2).toFixed(2)}`, legendCanvas.height / 2);
+      drawLabel(`${lowerLimit.toFixed(2)}`, barBottom);
+
+      return new Promise((resolve, reject) => {
+        legendCanvas.toBlob((blob) => {
+          if (blob) {
+            resolve(blob);
+          } else {
+            reject(new Error("Failed to create legend blob."));
+          }
+        }, "image/png");
+      });
+    }
+
     const createHeatmapOverlayBlob = async (bounds) => {
       const lonSpan = Math.max(bounds.east - bounds.west, 1e-9);
       const latSpan = Math.max(bounds.north - bounds.south, 1e-9);
@@ -2538,7 +2613,6 @@ export function ResultsPage({
       const width = 1400;
       const height = Math.max(720, Math.min(1800, Math.round(width / aspect)));
 
-      // Keep two accumulators so color reflects methane values, not point density.
       const pixelCount = width * height;
       const weightSums = new Float32Array(pixelCount);
       const methaneSums = new Float32Array(pixelCount);
@@ -2581,6 +2655,74 @@ export function ResultsPage({
         }
       }
 
+      const DENSITY_EPSILON = 1e-3;
+      const filledWeightSums = Float32Array.from(weightSums);
+      const filledMethaneSums = Float32Array.from(methaneSums);
+      const maxFillIterations = 4;
+      const fillNeighborhoodRadius = 10;
+      const fillNeighborThreshold = 10;
+
+      for (let iteration = 0; iteration < maxFillIterations; iteration += 1) {
+        let didFillAnyPixel = false;
+
+        for (let y = fillNeighborhoodRadius; y < height - fillNeighborhoodRadius; y += 1) {
+          for (let x = fillNeighborhoodRadius; x < width - fillNeighborhoodRadius; x += 1) {
+            const pixelIndex = y * width + x;
+            if (filledWeightSums[pixelIndex] > DENSITY_EPSILON) {
+              continue;
+            }
+
+            const activeNeighbors = [];
+
+            for (let offsetY = -fillNeighborhoodRadius; offsetY <= fillNeighborhoodRadius; offsetY += 1) {
+              for (let offsetX = -fillNeighborhoodRadius; offsetX <= fillNeighborhoodRadius; offsetX += 1) {
+                if (offsetX === 0 && offsetY === 0) {
+                  continue;
+                }
+
+                if (Math.abs(offsetX) + Math.abs(offsetY) > fillNeighborhoodRadius + 1) {
+                  continue;
+                }
+
+                const neighborIndex = pixelIndex + offsetY * width + offsetX;
+                if (filledWeightSums[neighborIndex] > DENSITY_EPSILON) {
+                  activeNeighbors.push(neighborIndex);
+                }
+              }
+            }
+
+            if (activeNeighbors.length < fillNeighborThreshold) {
+              continue;
+            }
+
+            const averagedNeighborDensity =
+              activeNeighbors.reduce(
+                (sum, neighborIndex) => sum + filledWeightSums[neighborIndex],
+                0,
+              ) / activeNeighbors.length;
+
+            const averagedNeighborMethane =
+              activeNeighbors.reduce((sum, neighborIndex) => {
+                const density = filledWeightSums[neighborIndex];
+                if (density <= DENSITY_EPSILON) {
+                  return sum;
+                }
+
+                return sum + filledMethaneSums[neighborIndex] / density;
+              }, 0) / activeNeighbors.length;
+
+            const fillDensity = averagedNeighborDensity * 0.72;
+            filledWeightSums[pixelIndex] = fillDensity;
+            filledMethaneSums[pixelIndex] = fillDensity * averagedNeighborMethane;
+            didFillAnyPixel = true;
+          }
+        }
+
+        if (!didFillAnyPixel) {
+          break;
+        }
+      }
+
       const colorCanvas = document.createElement("canvas");
       colorCanvas.width = width;
       colorCanvas.height = height;
@@ -2592,7 +2734,7 @@ export function ResultsPage({
 
       const densityValues = [];
       for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
-        const density = weightSums[pixelIndex];
+        const density = filledWeightSums[pixelIndex];
         if (density > 1e-6) {
           densityValues.push(density);
         }
@@ -2614,13 +2756,13 @@ export function ResultsPage({
 
       const outputImage = colorCtx.createImageData(width, height);
       for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
-        const density = weightSums[pixelIndex];
+        const density = filledWeightSums[pixelIndex];
         if (density <= 1e-6) {
           continue;
         }
 
         const rgbaIndex = pixelIndex * 4;
-        const methaneAtPixel = methaneSums[pixelIndex] / density;
+        const methaneAtPixel = filledMethaneSums[pixelIndex] / density;
         const normalizedDensity = clamp((density - p15) / densityRange, 0, 1);
 
         const pixelHex = getScaledMethaneColor(
@@ -2690,9 +2832,40 @@ export function ResultsPage({
       zip.file(heatmapAssetName, heatmapBlob);
     }
 
+    let legendAssetName = null;
+    if (heatmapPoints.length) {
+      const legendBlob = await createLegendOverlayBlob();
+      const legendAssetBaseName = sanitizeKmzAssetName(
+        `${missionLabelRaw}_legend`,
+        "legend",
+      );
+      legendAssetName = `images/${legendAssetBaseName}.png`;
+      zip.file(legendAssetName, legendBlob);
+    }
+
+    const legendFolder = legendAssetName
+    ? `<Folder>
+      <name>Legend</name>
+      <GroundOverlay>
+        <name>Heatmap Legend</name>
+        <color>f2ffffff</color>
+        <Icon>
+          <href>${xmlEscape(legendAssetName)}</href>
+        </Icon>
+        <drawOrder>2</drawOrder>
+        <LatLonBox>
+          <north>${heatBounds.north - 0.0005}</north>
+          <south>${heatBounds.south + 0.0005}</south>
+          <east>${heatBounds.east + 0.0020}</east>
+          <west>${heatBounds.east + 0.0007}</west>
+        </LatLonBox>
+      </GroundOverlay>
+    </Folder>`
+      : "";
+
     const orthophotoFolder = orthophotoOverlay
       ? `<Folder>
-      <name>Orthophoto Overlay</name>
+      <name>Orthophoto</name>
       <GroundOverlay>
         <name>${xmlEscape(orthophotoOverlay.fileName || "Orthophoto")}</name>
         <Icon>
@@ -2711,7 +2884,7 @@ export function ResultsPage({
 
     const heatmapOverlayFolder = heatmapAssetName
       ? `<Folder>
-      <name>Smooth Heatmap</name>
+      <name>Heatmap</name>
       <GroundOverlay>
         <name>Telemetry Heatmap</name>
         <color>f2ffffff</color>
@@ -2759,6 +2932,7 @@ const kml = `<?xml version="1.0" encoding="UTF-8"?>
     ${pointStyleDefs.join("\n    ")}
     ${orthophotoFolder}
     ${heatmapOverlayFolder}
+    ${legendFolder}
   </Document>
 </kml>`;
 
@@ -2791,6 +2965,7 @@ const kml = `<?xml version="1.0" encoding="UTF-8"?>
     selectedMission,
     selectedResultDroneId,
     selectedFlowDataForMapWithStartFilter,
+    selectedMissionOrthophoto,
   ]);
 
   const handleDownloadAnalysis = useCallback(() => {

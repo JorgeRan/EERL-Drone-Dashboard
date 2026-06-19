@@ -32,6 +32,28 @@ function metersToLongitudeDegrees(meters, atLatitude) {
     return meters / (111320 * Math.cos((atLatitude * Math.PI) / 180))
 }
 
+const MAX_PLUME_FEATURES = 12000
+
+function decimateFeatures(features, maxCount) {
+    const rows = Array.isArray(features) ? features : []
+    if (rows.length <= maxCount) {
+        return rows
+    }
+
+    const stride = Math.max(1, Math.ceil(rows.length / maxCount))
+    const reduced = []
+
+    for (let index = 0; index < rows.length; index += stride) {
+        reduced.push(rows[index])
+    }
+
+    if (reduced[reduced.length - 1] !== rows[rows.length - 1]) {
+        reduced.push(rows[rows.length - 1])
+    }
+
+    return reduced.slice(0, maxCount)
+}
+
 export function getMethaneColor(value) {
     if (value === 0) return '#64748b'
     if (value < 0.8) return '#38bdf8'
@@ -123,19 +145,20 @@ export function buildMethanePlumeDataset(traceDataset) {
 
             return Number(left.properties?.sampleOrder ?? 0) - Number(right.properties?.sampleOrder ?? 0)
         })
+    const plumeFeatures = decimateFeatures(positiveFeatures, MAX_PLUME_FEATURES)
 
-    if (positiveFeatures.length === 0) {
+    if (plumeFeatures.length === 0) {
         return {
             type: 'FeatureCollection',
             features: [],
         }
     }
 
-    const minimumAltitude = Math.min(...positiveFeatures.map((feature) => feature.properties.altitude))
+    const minimumAltitude = Math.min(...plumeFeatures.map((feature) => feature.properties.altitude))
 
     return {
         type: 'FeatureCollection',
-        features: positiveFeatures.map((feature, index) => {
+        features: plumeFeatures.map((feature, index) => {
             const [sampleLon, sampleLat] = feature.geometry.coordinates
             const { methane, altitude } = feature.properties
             const footprintRadiusMeters = 1

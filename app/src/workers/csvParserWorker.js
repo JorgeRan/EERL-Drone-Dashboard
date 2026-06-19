@@ -14,8 +14,9 @@ const shouldDisplayTelemetry = (source) => {
     parseNumber(source?.payload?.flight_status) ??
     parseNumber(source?.payload?.flightStatus);
 
-  // Keep telemetry visible when flight_status is missing.
-  if (flightStatus === null) {
+  // Keep telemetry visible when flight_status is missing or 0.
+  // Some CSV formats encode 0 as "not applicable" rather than "stopped on ground".
+  if (flightStatus === null || flightStatus === 0) {
     return true;
   }
 
@@ -281,6 +282,21 @@ const parseTimestamp = (rawTime, options = {}) => {
   const timeOnly = withTimeOnlyTimestamp(value, baseDateMs, lastTimestampMs);
   if (timeOnly) {
     return timeOnly;
+  }
+
+  // Handle "yyyy-mm-dd hh:mm:ss[.fraction]" (space-separated, no T) as UTC.
+  // Supports up to microsecond precision (6 decimal digits) — truncates to ms.
+  const spaceDateTimeMatch = value.match(
+    /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?$/,
+  );
+  if (spaceDateTimeMatch) {
+    const fractional = spaceDateTimeMatch[3] ?? "0";
+    const ms = String(fractional).padEnd(3, "0").slice(0, 3);
+    const timestampIso = `${spaceDateTimeMatch[1]}T${spaceDateTimeMatch[2]}.${ms}Z`;
+    const timestampMs = new Date(timestampIso).getTime();
+    if (Number.isFinite(timestampMs)) {
+      return { timestampIso, timestampMs };
+    }
   }
 
   const [datePart, timePart] = value.split("_");
