@@ -2292,8 +2292,8 @@ export function ResultsPage({
         const traceValue = Number(point?.methane ?? 0);
         const normalizedWeight = clamp((traceValue - lowerLimit) / span, 0, 1);
         const heatmapColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
-        const radiusMeters = 7 + normalizedWeight * 15;
-
+        // const radiusMeters = 7 + normalizedWeight * 15;
+        const radiusMeters = 10;
         return {
           type: "Feature",
           geometry: buildCirclePolygon(point.longitude, point.latitude, radiusMeters),
@@ -2464,7 +2464,7 @@ export function ResultsPage({
 
     const pointStyleMap = new globalThis.Map();
     const pointStyleDefs = [];
-    const pointPlacemarks = exportedTracePoints.map((point, index) => {
+    exportedTracePoints.forEach((point) => {
       const traceValue = Number(point?.methane ?? 0);
       const markerColor = getScaledMethaneColor(traceValue, lowerLimit, upperLimit);
       const styleKey = `${markerColor.toLowerCase()}-pt`;
@@ -2476,27 +2476,12 @@ export function ResultsPage({
           `<Style id="${styleId}"><IconStyle><color>${toKmlColor(markerColor, "70")}</color><scale>0.55</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/shaded_dot.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`,
         );
       }
-
-      const styleId = pointStyleMap.get(styleKey);
-      const altitude = Number(point?.altitude ?? 0);
-      const displayMetricLabel = xmlEscape(point?.displayMetricLabel || "Value");
-      const displayMetricUnits = xmlEscape(point?.displayMetricUnits || "");
-      const description = xmlEscape(
-        `${displayMetricLabel}: ${traceValue.toFixed(3)} ${displayMetricUnits}\nDrone: ${point?.droneId || "unknown"}\nTime: ${point?.timestampIso || "n/a"}`,
-      );
-
-      return `<Placemark><name>Sample ${index + 1}</name><styleUrl>#${styleId}</styleUrl><description>${description}</description><Point><coordinates>${point.longitude},${point.latitude},${altitude}</coordinates></Point></Placemark>`;
     });
-
-    const pathCoordinates = exportedTracePoints
-      .map((point) => `${point.longitude},${point.latitude},${Number(point?.altitude ?? 0)}`)
-      .join(" ");
-    const pathPlacemark = `<Placemark><name>Mission Path</name><Style><LineStyle><color>ff4ade80</color><width>3</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>${pathCoordinates}</coordinates></LineString></Placemark>`;
 
     const orthophotoOverlay =
       selectedMissionOrthophoto?.imageUrl &&
-      Array.isArray(selectedMissionOrthophoto.coordinates) &&
-      selectedMissionOrthophoto.coordinates.length === 4
+        Array.isArray(selectedMissionOrthophoto.coordinates) &&
+        selectedMissionOrthophoto.coordinates.length === 4
         ? selectedMissionOrthophoto
         : null;
 
@@ -2556,7 +2541,7 @@ export function ResultsPage({
 
       const barX = 20;
       const barWidth = 22;
-      const barTop = 18;
+      const barTop = 25;
       const barBottom = legendCanvas.height - 18;
       const barHeight = barBottom - barTop;
       const textX = barX + barWidth + 14;
@@ -2585,15 +2570,22 @@ export function ResultsPage({
         legendCtx.font = labelStyle;
         legendCtx.textBaseline = "middle";
         legendCtx.lineWidth = 4;
-        legendCtx.strokeStyle = shadowColor;
-        legendCtx.strokeText(text, textX, y);
-        legendCtx.fillStyle = textColor;
-        legendCtx.fillText(text, textX, y);
+        if (text === "Methane (ppm*m)") {
+          legendCtx.strokeStyle = shadowColor;
+          legendCtx.strokeText(text, textX - 14, y);
+          legendCtx.fillStyle = textColor;
+          legendCtx.fillText(text, textX - 14, y);
+        } else {
+          legendCtx.strokeStyle = shadowColor;
+          legendCtx.strokeText(text, textX, y);
+          legendCtx.fillStyle = textColor;
+          legendCtx.fillText(text, textX, y);
+        }
       };
-
-      drawLabel(`${upperLimit.toFixed(2)}`, barTop);
-      drawLabel(`${((upperLimit + lowerLimit) / 2).toFixed(2)}`, legendCanvas.height / 2);
-      drawLabel(`${lowerLimit.toFixed(2)}`, barBottom);
+      drawLabel("Methane (ppm*m)", barTop - 15);
+      drawLabel(`${upperLimit}`, barTop);
+      drawLabel(`${((upperLimit + lowerLimit) / 2)}`, legendCanvas.height / 2);
+      drawLabel(`${lowerLimit}`, barBottom);
 
       return new Promise((resolve, reject) => {
         legendCanvas.toBlob((blob) => {
@@ -2610,28 +2602,39 @@ export function ResultsPage({
       const lonSpan = Math.max(bounds.east - bounds.west, 1e-9);
       const latSpan = Math.max(bounds.north - bounds.south, 1e-9);
       const aspect = clamp(lonSpan / latSpan, 0.45, 2.3);
-      const width = 1400;
-      const height = Math.max(720, Math.min(1800, Math.round(width / aspect)));
+      const width = 2200;
+      const height = Math.max(1000, Math.min(2600, Math.round(width / aspect)));
+      const fieldScale = 0.4;
+      const fieldWidth = Math.max(960, Math.round(width * fieldScale));
+      const fieldHeight = Math.max(640, Math.round(height * fieldScale));
 
-      const pixelCount = width * height;
+      const pixelCount = fieldWidth * fieldHeight;
       const weightSums = new Float32Array(pixelCount);
       const methaneSums = new Float32Array(pixelCount);
 
-      for (const point of heatmapPoints) {
-        const traceValue = Number(point?.methane ?? 0);
-        const methaneWeight = clamp((traceValue - lowerLimit) / span, 0, 1);
-        const centerX = ((Number(point.longitude) - bounds.west) / lonSpan) * width;
+      const sortedHeatmapPoints = [...heatmapPoints].sort(
+        (left, right) => Number(left?.methane ?? 0) - Number(right?.methane ?? 0),
+      );
+
+      for (const point of sortedHeatmapPoints) {
+        const methane = Number(point?.methane ?? 0);
+        const centerX =
+          ((Number(point.longitude) - bounds.west) / lonSpan) *
+          fieldWidth;
         const centerY =
           (1 - (Number(point.latitude) - bounds.south) / latSpan) *
-          height;
-        const radius = 8 + methaneWeight * 24;
+          fieldHeight;
+        const methaneWeight =
+          clamp((methane - lowerLimit) / span, 0, 1);
+        const scale = Math.max(fieldWidth / width, fieldHeight / height);
+        const radius = (30 + methaneWeight * 80) * scale;
+        const sigma = radius * 0.45;
         const radiusSquared = radius * radius;
-        const baseWeight = 0.35 + methaneWeight * 0.65;
 
         const minX = Math.max(0, Math.floor(centerX - radius));
-        const maxX = Math.min(width - 1, Math.ceil(centerX + radius));
+        const maxX = Math.min(fieldWidth - 1, Math.ceil(centerX + radius));
         const minY = Math.max(0, Math.floor(centerY - radius));
-        const maxY = Math.min(height - 1, Math.ceil(centerY + radius));
+        const maxY = Math.min(fieldHeight - 1, Math.ceil(centerY + radius));
 
         for (let y = minY; y <= maxY; y += 1) {
           const dy = y - centerY;
@@ -2639,18 +2642,22 @@ export function ResultsPage({
           for (let x = minX; x <= maxX; x += 1) {
             const dx = x - centerX;
             const distanceSquared = dx * dx + dy * dy;
+
             if (distanceSquared > radiusSquared) {
               continue;
             }
 
-            const normalizedDistance = 1 - distanceSquared / radiusSquared;
             const kernel =
-              normalizedDistance * normalizedDistance * normalizedDistance;
-            const weight = kernel * baseWeight;
-            const pixelIndex = y * width + x;
+              Math.exp(
+                -distanceSquared /
+                  (2 * sigma * sigma)
+              );
 
-            weightSums[pixelIndex] += weight;
-            methaneSums[pixelIndex] += weight * traceValue;
+            const pixelIndex =
+              y * fieldWidth + x;
+
+            weightSums[pixelIndex] += kernel;
+            methaneSums[pixelIndex] += kernel * methane;
           }
         }
       }
@@ -2658,74 +2665,127 @@ export function ResultsPage({
       const DENSITY_EPSILON = 1e-3;
       const filledWeightSums = Float32Array.from(weightSums);
       const filledMethaneSums = Float32Array.from(methaneSums);
-      const maxFillIterations = 4;
-      const fillNeighborhoodRadius = 10;
-      const fillNeighborThreshold = 10;
+      // const maxFillIterations = 0;
+      // const fillNeighborhoodRadius = 2;
+      // const fillNeighborThreshold = 2;
 
-      for (let iteration = 0; iteration < maxFillIterations; iteration += 1) {
-        let didFillAnyPixel = false;
+      // for (let iteration = 0; iteration < maxFillIterations; iteration += 1) {
+      //   let didFillAnyPixel = false;
 
-        for (let y = fillNeighborhoodRadius; y < height - fillNeighborhoodRadius; y += 1) {
-          for (let x = fillNeighborhoodRadius; x < width - fillNeighborhoodRadius; x += 1) {
-            const pixelIndex = y * width + x;
-            if (filledWeightSums[pixelIndex] > DENSITY_EPSILON) {
-              continue;
-            }
+      //   for (let y = fillNeighborhoodRadius; y < fieldHeight - fillNeighborhoodRadius; y += 1) {
+      //     for (let x = fillNeighborhoodRadius; x < fieldWidth - fillNeighborhoodRadius; x += 1) {
+      //       const pixelIndex = y * fieldWidth + x;
+      //       if (filledWeightSums[pixelIndex] > DENSITY_EPSILON) {
+      //         continue;
+      //       }
 
-            const activeNeighbors = [];
+      //       const activeNeighbors = [];
 
-            for (let offsetY = -fillNeighborhoodRadius; offsetY <= fillNeighborhoodRadius; offsetY += 1) {
-              for (let offsetX = -fillNeighborhoodRadius; offsetX <= fillNeighborhoodRadius; offsetX += 1) {
-                if (offsetX === 0 && offsetY === 0) {
-                  continue;
-                }
+      //       for (let offsetY = -fillNeighborhoodRadius; offsetY <= fillNeighborhoodRadius; offsetY += 1) {
+      //         for (let offsetX = -fillNeighborhoodRadius; offsetX <= fillNeighborhoodRadius; offsetX += 1) {
+      //           if (offsetX === 0 && offsetY === 0) {
+      //             continue;
+      //           }
 
-                if (Math.abs(offsetX) + Math.abs(offsetY) > fillNeighborhoodRadius + 1) {
-                  continue;
-                }
+      //           if (Math.abs(offsetX) + Math.abs(offsetY) > fillNeighborhoodRadius + 1) {
+      //             continue;
+      //           }
 
-                const neighborIndex = pixelIndex + offsetY * width + offsetX;
-                if (filledWeightSums[neighborIndex] > DENSITY_EPSILON) {
-                  activeNeighbors.push(neighborIndex);
-                }
-              }
-            }
+      //           const neighborIndex = pixelIndex + offsetY * fieldWidth + offsetX;
+      //           if (filledWeightSums[neighborIndex] > DENSITY_EPSILON) {
+      //             activeNeighbors.push(neighborIndex);
+      //           }
+      //         }
+      //       }
 
-            if (activeNeighbors.length < fillNeighborThreshold) {
-              continue;
-            }
+      //       if (activeNeighbors.length < fillNeighborThreshold) {
+      //         continue;
+      //       }
 
-            const averagedNeighborDensity =
-              activeNeighbors.reduce(
-                (sum, neighborIndex) => sum + filledWeightSums[neighborIndex],
-                0,
-              ) / activeNeighbors.length;
+      //       const averagedNeighborDensity =
+      //         activeNeighbors.reduce(
+      //           (sum, neighborIndex) => sum + filledWeightSums[neighborIndex],
+      //           0,
+      //         ) / activeNeighbors.length;
 
-            const averagedNeighborMethane =
-              activeNeighbors.reduce((sum, neighborIndex) => {
-                const density = filledWeightSums[neighborIndex];
-                if (density <= DENSITY_EPSILON) {
-                  return sum;
-                }
+      //       const averagedNeighborMethane =
+      //         activeNeighbors.reduce((sum, neighborIndex) => {
+      //           const density = filledWeightSums[neighborIndex];
+      //           if (density <= DENSITY_EPSILON) {
+      //             return sum;
+      //           }
 
-                return sum + filledMethaneSums[neighborIndex] / density;
-              }, 0) / activeNeighbors.length;
+      //           return sum + filledMethaneSums[neighborIndex] / density;
+      //         }, 0) / activeNeighbors.length;
 
-            const fillDensity = averagedNeighborDensity * 0.72;
-            filledWeightSums[pixelIndex] = fillDensity;
-            filledMethaneSums[pixelIndex] = fillDensity * averagedNeighborMethane;
-            didFillAnyPixel = true;
-          }
-        }
+      //       const fillDensity = averagedNeighborDensity * 0.72;
+      //       filledWeightSums[pixelIndex] = fillDensity;
+      //       filledMethaneSums[pixelIndex] = fillDensity * averagedNeighborMethane;
+      //       didFillAnyPixel = true;
+      //     }
+      //   }
 
-        if (!didFillAnyPixel) {
-          break;
+      //   if (!didFillAnyPixel) {
+      //     break;
+      //   }
+      // }
+
+      const methaneField = new Float32Array(pixelCount);
+      for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+        const density = filledWeightSums[pixelIndex];
+        if (density > DENSITY_EPSILON) {
+          methaneField[pixelIndex] = filledMethaneSums[pixelIndex] / density;
         }
       }
 
+      const blurredMethaneField = new Float32Array(pixelCount);
+      const blurPassCount = 4;
+      let sourceField = methaneField;
+      let targetField = blurredMethaneField;
+
+      for (let pass = 0; pass < blurPassCount; pass += 1) {
+        for (let y = 0; y < fieldHeight; y += 1) {
+          for (let x = 0; x < fieldWidth; x += 1) {
+            const pixelIndex = y * fieldWidth + x;
+            let valueSum = sourceField[pixelIndex];
+            let sampleCount = 1;
+
+            if (y > 0) {
+              valueSum += sourceField[pixelIndex - fieldWidth];
+              sampleCount += 1;
+            }
+
+            if (y + 1 < fieldHeight) {
+              valueSum += sourceField[pixelIndex + fieldWidth];
+              sampleCount += 1;
+            }
+
+            if (x > 0) {
+              valueSum += sourceField[pixelIndex - 1];
+              sampleCount += 1;
+            }
+
+            if (x + 1 < fieldWidth) {
+              valueSum += sourceField[pixelIndex + 1];
+              sampleCount += 1;
+            }
+
+            targetField[pixelIndex] = valueSum / sampleCount;
+          }
+        }
+
+        if (pass < blurPassCount - 1) {
+          const nextSource = sourceField;
+          sourceField = targetField;
+          targetField = nextSource;
+        }
+      }
+
+      const methaneFieldForColor = blurPassCount % 2 === 0 ? methaneField : blurredMethaneField;
+
       const colorCanvas = document.createElement("canvas");
-      colorCanvas.width = width;
-      colorCanvas.height = height;
+      colorCanvas.width = fieldWidth;
+      colorCanvas.height = fieldHeight;
       const colorCtx = colorCanvas.getContext("2d");
 
       if (!colorCtx) {
@@ -2754,7 +2814,7 @@ export function ResultsPage({
       const p97 = percentileValue(0.97);
       const densityRange = Math.max(p97 - p15, 1e-5);
 
-      const outputImage = colorCtx.createImageData(width, height);
+      const outputImage = colorCtx.createImageData(fieldWidth, fieldHeight);
       for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
         const density = filledWeightSums[pixelIndex];
         if (density <= 1e-6) {
@@ -2762,11 +2822,11 @@ export function ResultsPage({
         }
 
         const rgbaIndex = pixelIndex * 4;
-        const methaneAtPixel = filledMethaneSums[pixelIndex] / density;
+        const displayMethane = methaneFieldForColor[pixelIndex];
         const normalizedDensity = clamp((density - p15) / densityRange, 0, 1);
 
         const pixelHex = getScaledMethaneColor(
-          methaneAtPixel,
+          displayMethane,
           lowerLimit,
           upperLimit,
         );
@@ -2785,6 +2845,38 @@ export function ResultsPage({
 
       colorCtx.putImageData(outputImage, 0, 0);
 
+      const upscaledCanvas = document.createElement("canvas");
+      upscaledCanvas.width = width;
+      upscaledCanvas.height = height;
+      const upscaledCtx = upscaledCanvas.getContext("2d");
+
+      if (!upscaledCtx) {
+        throw new Error("Unable to create upscaled heatmap canvas.");
+      }
+
+      upscaledCtx.imageSmoothingEnabled = true;
+      upscaledCtx.imageSmoothingQuality = "high";
+      upscaledCtx.drawImage(colorCanvas, 0, 0, fieldWidth, fieldHeight, 0, 0, width, height);
+
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const maxRadius = Math.sqrt(centerX * centerX + centerY * centerY) * 0.92;
+      const radialGradient = upscaledCtx.createRadialGradient(
+        centerX,
+        centerY,
+        maxRadius * 0.5,
+        centerX,
+        centerY,
+        maxRadius,
+      );
+      radialGradient.addColorStop(0, "rgba(0, 0, 0, 0.0)");
+      radialGradient.addColorStop(0.85, "rgba(0, 0, 0, 0.0)");
+      radialGradient.addColorStop(1, "rgba(0, 0, 0, 1.0)");
+      upscaledCtx.fillStyle = radialGradient;
+      upscaledCtx.globalCompositeOperation = "destination-out";
+      upscaledCtx.fillRect(0, 0, width, height);
+      upscaledCtx.globalCompositeOperation = "source-over";
+
       const softenedCanvas = document.createElement("canvas");
       softenedCanvas.width = width;
       softenedCanvas.height = height;
@@ -2794,8 +2886,8 @@ export function ResultsPage({
         throw new Error("Unable to create softened heatmap canvas.");
       }
 
-      softenedCtx.filter = "blur(0.6px)";
-      softenedCtx.drawImage(colorCanvas, 0, 0);
+      softenedCtx.filter = "blur(5px)";
+      softenedCtx.drawImage(upscaledCanvas, 0, 0);
       softenedCtx.filter = "none";
 
       return canvasToBlob(softenedCanvas, "image/png");
@@ -2813,7 +2905,7 @@ export function ResultsPage({
       const imageBlob = await imageResponse.blob();
       const assetBaseName = sanitizeKmzAssetName(
         orthophotoOverlay.fileName?.replace(/\.[^.]+$/, "") ||
-          "mission_orthophoto",
+        "mission_orthophoto",
         "mission_orthophoto",
       );
       orthophotoAssetName = `images/${assetBaseName}.${mimeTypeToExtension(imageBlob.type)}`;
@@ -2844,22 +2936,20 @@ export function ResultsPage({
     }
 
     const legendFolder = legendAssetName
-    ? `<Folder>
+      ? `<Folder>
       <name>Legend</name>
-      <GroundOverlay>
+      <ScreenOverlay>
         <name>Heatmap Legend</name>
         <color>f2ffffff</color>
         <Icon>
           <href>${xmlEscape(legendAssetName)}</href>
         </Icon>
         <drawOrder>2</drawOrder>
-        <LatLonBox>
-          <north>${heatBounds.north - 0.0005}</north>
-          <south>${heatBounds.south + 0.0005}</south>
-          <east>${heatBounds.east + 0.0020}</east>
-          <west>${heatBounds.east + 0.0007}</west>
-        </LatLonBox>
-      </GroundOverlay>
+        <overlayXY x="0" y="1" xunits="fraction" yunits="fraction"/>
+        <screenXY x="0.03" y="0.97" xunits="fraction" yunits="fraction"/>
+        <rotationXY x="0" y="0" xunits="fraction" yunits="fraction"/>
+        <size x="180" y="400" xunits="pixels" yunits="pixels"/>
+      </ScreenOverlay>
     </Folder>`
       : "";
 
@@ -2892,6 +2982,8 @@ export function ResultsPage({
           <href>${xmlEscape(heatmapAssetName)}</href>
         </Icon>
         <drawOrder>2</drawOrder>
+        <altitude>1</altitude>
+        <altitudeMode>relativeToGround</altitudeMode>
         <LatLonBox>
           <north>${heatBounds.north}</north>
           <south>${heatBounds.south}</south>
@@ -2902,27 +2994,27 @@ export function ResultsPage({
     </Folder>`
       : "";
 
-//     const kml = `<?xml version="1.0" encoding="UTF-8"?>
-// <kml xmlns="http://www.opengis.net/kml/2.2">
-//   <Document>
-//     <name>${missionLabel}</name>
-//     <description>${xmlEscape(
-//       `Generated by EERL Dashboard. Scale ${lowerLimit.toFixed(2)} to ${upperLimit.toFixed(2)}.`,
-//     )}</description>
-//     ${pointStyleDefs.join("\n    ")}
-//     <Folder>
-//       <name>Mission Path</name>
-//       ${pathPlacemark}
-//     </Folder>
-//     <Folder>
-//       <name>Sample Points</name>
-//       ${pointPlacemarks.join("\n      ")}
-//       </Folder>
-//     ${orthophotoFolder}
-//     ${heatmapOverlayFolder}
-//   </Document>
-// </kml>`;
-const kml = `<?xml version="1.0" encoding="UTF-8"?>
+    //     const kml = `<?xml version="1.0" encoding="UTF-8"?>
+    // <kml xmlns="http://www.opengis.net/kml/2.2">
+    //   <Document>
+    //     <name>${missionLabel}</name>
+    //     <description>${xmlEscape(
+    //       `Generated by EERL Dashboard. Scale ${lowerLimit.toFixed(2)} to ${upperLimit.toFixed(2)}.`,
+    //     )}</description>
+    //     ${pointStyleDefs.join("\n    ")}
+    //     <Folder>
+    //       <name>Mission Path</name>
+    //       ${pathPlacemark}
+    //     </Folder>
+    //     <Folder>
+    //       <name>Sample Points</name>
+    //       ${pointPlacemarks.join("\n      ")}
+    //       </Folder>
+    //     ${orthophotoFolder}
+    //     ${heatmapOverlayFolder}
+    //   </Document>
+    // </kml>`;
+    const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${missionLabel}</name>
@@ -4213,8 +4305,8 @@ const kml = `<?xml version="1.0" encoding="UTF-8"?>
               </h4>
               <div className="mt-2 h-full">
                 {selectedSensorMode ===
-                SENSOR_MODE_AERIS ? null : selectedSensorMode ===
-                  SENSOR_MODE_MIXED ? (
+                  SENSOR_MODE_AERIS ? null : selectedSensorMode ===
+                    SENSOR_MODE_MIXED ? (
                   <div className="space-y-3">
                     {hasDualTraceData ? (
                       <MethanePanel
@@ -4253,7 +4345,7 @@ const kml = `<?xml version="1.0" encoding="UTF-8"?>
                   </div>
                 </div>
               ) : null}
-            </div> 
+            </div>
 
             {isMissionLoading ? null : (
               <div
@@ -4300,7 +4392,7 @@ const kml = `<?xml version="1.0" encoding="UTF-8"?>
                         "linear-gradient(150deg, rgba(106, 214, 194, 0.24) 0%, rgba(106, 214, 194, 0.08) 45%, rgba(8, 15, 17, 0.6) 100%)",
                     }}
                   >
-                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.teal}}>
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.teal }}>
                       .csv
                     </div>
                     <p

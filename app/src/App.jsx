@@ -488,6 +488,20 @@ const buildCombinedFlowDataForDrones = ({
   return combined;
 };
 
+const getDashboardFlowSelectionValue = (point) => {
+  const purway = Number(point?.purway);
+  if (Number.isFinite(purway)) {
+    return purway;
+  }
+
+  const methane = Number(point?.methane);
+  if (Number.isFinite(methane)) {
+    return methane;
+  }
+
+  return null;
+};
+
 const HOLD_DELAY = 2000;
 const MOVEMENT_THRESHOLD_METERS = 1.5;
 const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
@@ -649,10 +663,11 @@ function App() {
     const dataLength = dashboardChartFlowData.length;
     const maxPpm = Math.max(
       1,
-      ...dashboardChartFlowData.map((point) =>
-        Math.max(Number(point?.methane) || 0, Number(point?.purway) || 0),
+      ...dashboardChartFlowData.map(
+        (point) => getDashboardFlowSelectionValue(point) ?? 0,
       ),
     );
+    const minimumPpmBand = Math.min(Math.max(maxPpm * 0.02, 0.1), maxPpm);
 
     if (dataLength <= 1) {
       return {
@@ -668,14 +683,47 @@ function App() {
       safeStart + 1,
       Math.min(selectedWindow.endIndex ?? dataLength - 1, dataLength - 1),
     );
+    const safePpmMin = Math.max(
+      0,
+      Math.min(selectedWindow.ppmMin ?? 0, maxPpm - minimumPpmBand),
+    );
+    const safePpmMax = Math.max(
+      safePpmMin + minimumPpmBand,
+      Math.min(selectedWindow.ppmMax ?? maxPpm, maxPpm),
+    );
 
     return {
       startIndex: safeStart,
       endIndex: safeEnd,
-      ppmMin: 0,
-      ppmMax: maxPpm,
+      ppmMin: safePpmMin,
+      ppmMax: safePpmMax,
     };
   }, [dashboardChartFlowData, selectedWindow]);
+  const dashboardSelectedWindowFlowData = useMemo(
+    () =>
+      dashboardChartFlowData.slice(
+        selectedWindowForDashboard.startIndex,
+        selectedWindowForDashboard.endIndex + 1,
+      ),
+    [dashboardChartFlowData, selectedWindowForDashboard],
+  );
+  const dashboardSelectedTimeRange = useMemo(() => {
+    const windowStart = dashboardSelectedWindowFlowData[0] ?? null;
+    const windowEnd =
+      dashboardSelectedWindowFlowData[dashboardSelectedWindowFlowData.length - 1] ??
+      null;
+    const startTimestampMs = Number(windowStart?.timestampMs);
+    const endTimestampMs = Number(windowEnd?.timestampMs);
+
+    if (!Number.isFinite(startTimestampMs) || !Number.isFinite(endTimestampMs)) {
+      return null;
+    }
+
+    return {
+      startTimestampMs: Math.min(startTimestampMs, endTimestampMs),
+      endTimestampMs: Math.max(startTimestampMs, endTimestampMs),
+    };
+  }, [dashboardSelectedWindowFlowData]);
   const windSamples = useMemo(
     () => dashboardChartFlowData,
     [dashboardChartFlowData],
@@ -974,9 +1022,30 @@ function App() {
       const methaneFilteredFlowData = combinedFlowData.filter((point) =>
         shouldIncludeMethaneValidity(point, methaneValidityVisibility),
       );
-      const mapFlowData = methaneFilteredFlowData.length
+      const baseMapFlowData = methaneFilteredFlowData.length
         ? methaneFilteredFlowData
         : combinedFlowData;
+      const mapFlowData = baseMapFlowData.filter((point) => {
+        const selectionValue = getDashboardFlowSelectionValue(point);
+        if (
+          selectionValue === null ||
+          selectionValue < selectedWindowForDashboard.ppmMin ||
+          selectionValue > selectedWindowForDashboard.ppmMax
+        ) {
+          return false;
+        }
+
+        if (!dashboardSelectedTimeRange) {
+          return true;
+        }
+
+        const timestampMs = Number(point?.timestampMs);
+        return (
+          Number.isFinite(timestampMs) &&
+          timestampMs >= dashboardSelectedTimeRange.startTimestampMs &&
+          timestampMs <= dashboardSelectedTimeRange.endTimestampMs
+        );
+      });
 
       return buildDeckTracePointsFromFlowData(
         filterFlowPointsOutsideStartRadius(mapFlowData, {
@@ -992,6 +1061,8 @@ function App() {
       liveTelemetryByDrone,
       recordedFlowDataByDrone,
       visibleDashboardDroneIds,
+      selectedWindowForDashboard,
+      dashboardSelectedTimeRange,
       methaneValidityVisibility,
       startPointCoordinates,
       startPointFilterEnabled,

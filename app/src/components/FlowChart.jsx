@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { color } from "../constants/tailwind";
@@ -301,6 +301,10 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const navigatorRef = useRef(null);
   const ppmRangeRef = useRef(null);
   const dragHandleRef = useRef(null);
+  const selectionRef = useRef(selection);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  const pendingSelectionRef = useRef(null);
+  const dragFrameRef = useRef(0);
   const dataLength = flowData.length;
   const maxIndex = Math.max(dataLength - 1, 0);
   // const fullLeftAxisPeakValue = Math.max(
@@ -356,22 +360,8 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
     windowedData[windowedData.length - 1] ??
     flowData[dataLength - 1] ??
     { sniffer: 0, purway: 0, methane: 0 };
-  const leftAxisTicks = [
-    0,
-    Math.ceil(leftAxisPeakValue * 0.35),
-    Math.ceil(leftAxisPeakValue * 0.7),
-    Math.ceil(leftAxisPeakValue),
-  ];
-  const rightAxisTicks = [
-    0,
-    Math.ceil(rightAxisPeakValue * 0.35),
-    Math.ceil(rightAxisPeakValue * 0.7),
-    Math.ceil(rightAxisPeakValue),
-  ];
-  const startPercent =
-    maxIndex > 0 ? (safeSelection.startIndex / maxIndex) * 100 : 0;
-  const endPercent =
-    maxIndex > 0 ? (safeSelection.endIndex / maxIndex) * 100 : 100;
+  const startRatio = maxIndex > 0 ? safeSelection.startIndex / maxIndex : 0;
+  const endRatio = maxIndex > 0 ? safeSelection.endIndex / maxIndex : 1;
   const ppmMinPercent =
     leftAxisPeakValue > 0
       ? 100 - (safeSelection.ppmMin / leftAxisPeakValue) * 100
@@ -385,6 +375,70 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const deltaTime = formatDuration(
     (windowEnd?.timestampMs ?? 0) - (windowStart?.timestampMs ?? 0),
   );
+  const plotWidthExpression = `calc(100% - ${chartFrame.left + chartFrame.right}px)`;
+  const startHandleLeft = `calc(${chartFrame.left}px + ${startRatio} * ${plotWidthExpression})`;
+  const endHandleLeft = `calc(${chartFrame.left}px + ${endRatio} * ${plotWidthExpression})`;
+  const selectionOverlayLeft = `calc(${chartFrame.left}px + ${startRatio} * ${plotWidthExpression})`;
+  const selectionOverlayRight = `calc(${chartFrame.right}px + ${(1 - endRatio)} * ${plotWidthExpression})`;
+
+  useEffect(() => {
+    selectionRef.current = safeSelection;
+  }, [safeSelection]);
+
+  useEffect(() => {
+    onSelectionChangeRef.current = onSelectionChange;
+  }, [onSelectionChange]);
+
+  useEffect(() => {
+    return () => {
+      if (dragFrameRef.current) {
+        window.cancelAnimationFrame(dragFrameRef.current);
+      }
+    };
+  }, []);
+
+  const scheduleSelectionChange = useCallback((nextSelection) => {
+    const currentSelection = pendingSelectionRef.current ?? selectionRef.current;
+
+    if (
+      currentSelection.startIndex === nextSelection.startIndex &&
+      currentSelection.endIndex === nextSelection.endIndex &&
+      currentSelection.ppmMin === nextSelection.ppmMin &&
+      currentSelection.ppmMax === nextSelection.ppmMax
+    ) {
+      return;
+    }
+
+    pendingSelectionRef.current = nextSelection;
+
+    if (dragFrameRef.current) {
+      return;
+    }
+
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = 0;
+      const pendingSelection = pendingSelectionRef.current;
+      pendingSelectionRef.current = null;
+
+      if (!pendingSelection) {
+        return;
+      }
+
+      selectionRef.current = pendingSelection;
+      onSelectionChangeRef.current(pendingSelection);
+    });
+  }, []);
+
+  const updateSelection = useCallback((updater) => {
+    const baseSelection = pendingSelectionRef.current ?? selectionRef.current;
+    const nextSelection = clampSelection(
+      updater(baseSelection),
+      dataLength,
+      fullLeftAxisPeakValue,
+    );
+
+    scheduleSelectionChange(nextSelection);
+  }, [dataLength, fullLeftAxisPeakValue, scheduleSelectionChange]);
 
   useEffect(() => {
     const minimumPpmBand = Math.min(
@@ -398,24 +452,29 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       }
 
       const bounds = navigatorRef.current.getBoundingClientRect();
+      const plotLeft = bounds.left + chartFrame.left;
+      const plotWidth = Math.max(
+        bounds.width - chartFrame.left - chartFrame.right,
+        1,
+      );
       const clampedRatio = Math.max(
         0,
-        Math.min((clientX - bounds.left) / bounds.width, 1),
+        Math.min((clientX - plotLeft) / plotWidth, 1),
       );
       const nextIndex = Math.round(clampedRatio * maxIndex);
 
       if (dragHandleRef.current?.handle === "start") {
-        onSelectionChange({
-          ...safeSelection,
-          startIndex: Math.min(nextIndex, safeSelection.endIndex - 1),
-        });
+        updateSelection((currentSelection) => ({
+          ...currentSelection,
+          startIndex: Math.min(nextIndex, currentSelection.endIndex - 1),
+        }));
         return;
       }
 
-      onSelectionChange({
-        ...safeSelection,
-        endIndex: Math.max(nextIndex, safeSelection.startIndex + 1),
-      });
+      updateSelection((currentSelection) => ({
+        ...currentSelection,
+        endIndex: Math.max(nextIndex, currentSelection.startIndex + 1),
+      }));
     };
 
     const updatePpmSelectionFromClientY = (clientY) => {
@@ -431,17 +490,17 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       const nextPpm = Number((clampedRatio * leftAxisPeakValue).toFixed(2));
 
       if (dragHandleRef.current?.handle === "ppmMin") {
-        onSelectionChange({
-          ...safeSelection,
-          ppmMin: Math.min(nextPpm, safeSelection.ppmMax - minimumPpmBand),
-        });
+        updateSelection((currentSelection) => ({
+          ...currentSelection,
+          ppmMin: Math.min(nextPpm, currentSelection.ppmMax - minimumPpmBand),
+        }));
         return;
       }
 
-      onSelectionChange({
-        ...safeSelection,
-        ppmMax: Math.max(nextPpm, safeSelection.ppmMin + minimumPpmBand),
-      });
+      updateSelection((currentSelection) => ({
+        ...currentSelection,
+        ppmMax: Math.max(nextPpm, currentSelection.ppmMin + minimumPpmBand),
+      }));
     };
 
     const handlePointerMove = (event) => {
@@ -469,10 +528,12 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       window.removeEventListener("pointerup", handlePointerUp);
     };
   }, [
+    dataLength,
+    fullLeftAxisPeakValue,
     leftAxisPeakValue,
     maxIndex,
-    onSelectionChange,
     safeSelection,
+    updateSelection,
   ]);
 
   useEffect(() => {
@@ -522,22 +583,27 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
 
     if (axis === "x" && navigatorRef.current && maxIndex > 0) {
       const bounds = navigatorRef.current.getBoundingClientRect();
+      const plotLeft = bounds.left + chartFrame.left;
+      const plotWidth = Math.max(
+        bounds.width - chartFrame.left - chartFrame.right,
+        1,
+      );
       const clampedRatio = Math.max(
         0,
-        Math.min((event.clientX - bounds.left) / bounds.width, 1),
+        Math.min((event.clientX - plotLeft) / plotWidth, 1),
       );
       const nextIndex = Math.round(clampedRatio * maxIndex);
 
       if (handle === "start") {
-        onSelectionChange({
-          ...safeSelection,
-          startIndex: Math.min(nextIndex, safeSelection.endIndex - 1),
-        });
+        updateSelection((currentSelection) => ({
+          ...currentSelection,
+          startIndex: Math.min(nextIndex, currentSelection.endIndex - 1),
+        }));
       } else {
-        onSelectionChange({
-          ...safeSelection,
-          endIndex: Math.max(nextIndex, safeSelection.startIndex + 1),
-        });
+        updateSelection((currentSelection) => ({
+          ...currentSelection,
+          endIndex: Math.max(nextIndex, currentSelection.startIndex + 1),
+        }));
       }
 
       return;
@@ -556,15 +622,15 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       const nextPpm = Number((clampedRatio * leftAxisPeakValue).toFixed(2));
 
       if (handle === "ppmMin") {
-        onSelectionChange({
-          ...safeSelection,
-          ppmMin: Math.min(nextPpm, safeSelection.ppmMax - minimumPpmBand),
-        });
+        updateSelection((currentSelection) => ({
+          ...currentSelection,
+          ppmMin: Math.min(nextPpm, currentSelection.ppmMax - minimumPpmBand),
+        }));
       } else {
-        onSelectionChange({
-          ...safeSelection,
-          ppmMax: Math.max(nextPpm, safeSelection.ppmMin + minimumPpmBand),
-        });
+        updateSelection((currentSelection) => ({
+          ...currentSelection,
+          ppmMax: Math.max(nextPpm, currentSelection.ppmMin + minimumPpmBand),
+        }));
       }
     }
   };
@@ -678,8 +744,8 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
         <div
           className="pointer-events-none absolute top-[72px] bottom-[34px]"
           style={{
-            left: `${startPercent}%`,
-            width: `${Math.max(endPercent - startPercent, 0)}%`,
+            left: selectionOverlayLeft,
+            right: selectionOverlayRight,
             backgroundColor: "rgba(255, 255, 255, 0.04)",
           }}
         />
@@ -761,7 +827,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
           type="button"
           aria-label="Adjust selection start"
           className="absolute top-[72px] bottom-[20px] w-8 -translate-x-1/2 cursor-ew-resize bg-transparent"
-          style={{ left: `${startPercent}%` }}
+          style={{ left: startHandleLeft }}
           onPointerDown={beginHandleDrag("x", "start")}
         >
           <span
@@ -788,7 +854,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
           type="button"
           aria-label="Adjust selection end"
           className="absolute top-[72px] bottom-[20px] w-8 -translate-x-1/2 cursor-ew-resize bg-transparent"
-          style={{ left: `${endPercent}%` }}
+          style={{ left: endHandleLeft }}
           onPointerDown={beginHandleDrag("x", "end")}
         >
           <span

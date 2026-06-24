@@ -221,10 +221,38 @@ const isAllDroneSelection = (selectedDroneId) => {
   );
 };
 
-const MAX_LINESTRING_VERTICES = 60000;
+const MAX_LINESTRING_VERTICES = 12000;
+const MAX_FLIGHT_PATH_RENDER_POINTS = 30000;
+
+const decimateCoordinatesForRender = (coordinates, maxPoints) => {
+  const points = Array.isArray(coordinates) ? coordinates : [];
+
+  if (points.length <= maxPoints) {
+    return points;
+  }
+
+  const step = Math.ceil(points.length / maxPoints);
+  const simplified = [];
+
+  for (let index = 0; index < points.length; index += step) {
+    simplified.push(points[index]);
+  }
+
+  const lastPoint = points[points.length - 1];
+  const simplifiedLastPoint = simplified[simplified.length - 1];
+
+  if (lastPoint !== simplifiedLastPoint) {
+    simplified.push(lastPoint);
+  }
+
+  return simplified;
+};
 
 const splitCoordinatesIntoSafeSegments = (coordinates) => {
-  const points = Array.isArray(coordinates) ? coordinates : [];
+  const points = decimateCoordinatesForRender(
+    coordinates,
+    MAX_FLIGHT_PATH_RENDER_POINTS,
+  );
 
   if (points.length < 2) {
     return [];
@@ -543,7 +571,7 @@ export function Map({
   onToggleAllPlottedData,
   droneVisibilityById = {},
   onToggleDroneVisibility,
-  methaneValidityVisibility = { valid: true, invalid: true, noData: false },
+  methaneValidityVisibility = { valid: true, invalid: true, noData: true },
   onToggleMethaneValidity,
   resultsPageMode,
   heatmapOnlyMode = false,
@@ -598,7 +626,7 @@ export function Map({
   );
   const [lowerLimitInput, setLowerLimitInput] = useState("0");
   const [showFlightPath, setShowFlightPath] = useState(false);
-  const [showTargetMarkers, setShowTargetMarkers] = useState(false);
+  const [showTargetMarkers, setShowTargetMarkers] = useState(true);
   const [isAutoCenterEnabled, setIsAutoCenterEnabled] = useState(true);
   const [isStyleReady, setIsStyleReady] = useState(false);
   const [droneStates, setDroneStates] = useState([]);
