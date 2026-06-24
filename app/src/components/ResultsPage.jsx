@@ -463,6 +463,20 @@ const formatCompactValue = (value, digits = 2) => {
   });
 };
 
+const getResultsFlowSelectionValue = (point) => {
+  const purway = Number(point?.purway);
+  if (Number.isFinite(purway)) {
+    return purway;
+  }
+
+  const methane = Number(point?.methane);
+  if (Number.isFinite(methane)) {
+    return methane;
+  }
+
+  return null;
+};
+
 // const formatDateTimeLocalValue = (value) => {
 //   if (!value) {
 //     return "";
@@ -1775,9 +1789,76 @@ export function ResultsPage({
 
   useEffect(() => () => clearReplayTimer(), [clearReplayTimer]);
 
+  const selectedWindowTimeRangeForMap = useMemo(() => {
+    const totalPoints = selectedFlowData.length;
+    if (!totalPoints) {
+      return null;
+    }
+
+    const startIndex = Math.max(
+      0,
+      Math.min(Number(selectedWindow.startIndex) || 0, totalPoints - 1),
+    );
+    const endIndex = Math.max(
+      startIndex,
+      Math.min(Number(selectedWindow.endIndex) || startIndex, totalPoints - 1),
+    );
+    const startTimestampMs = Number(selectedFlowData[startIndex]?.timestampMs);
+    const endTimestampMs = Number(selectedFlowData[endIndex]?.timestampMs);
+
+    if (!Number.isFinite(startTimestampMs) || !Number.isFinite(endTimestampMs)) {
+      return null;
+    }
+
+    return {
+      startTimestampMs: Math.min(startTimestampMs, endTimestampMs),
+      endTimestampMs: Math.max(startTimestampMs, endTimestampMs),
+    };
+  }, [
+    selectedFlowData,
+    selectedWindow.endIndex,
+    selectedWindow.startIndex,
+  ]);
+
+  const selectedFlowDataForMapWithSelection = useMemo(() => {
+    const ppmMin = Number(selectedWindow.ppmMin);
+    const ppmMax = Number(selectedWindow.ppmMax);
+
+    return selectedFlowDataForMapWithStartFilter.filter((point) => {
+      const selectionValue = getResultsFlowSelectionValue(point);
+      if (selectionValue === null) {
+        return false;
+      }
+
+      if (Number.isFinite(ppmMin) && selectionValue < ppmMin) {
+        return false;
+      }
+
+      if (Number.isFinite(ppmMax) && selectionValue > ppmMax) {
+        return false;
+      }
+
+      if (!selectedWindowTimeRangeForMap) {
+        return true;
+      }
+
+      const timestampMs = Number(point?.timestampMs);
+      return (
+        Number.isFinite(timestampMs) &&
+        timestampMs >= selectedWindowTimeRangeForMap.startTimestampMs &&
+        timestampMs <= selectedWindowTimeRangeForMap.endTimestampMs
+      );
+    });
+  }, [
+    selectedFlowDataForMapWithStartFilter,
+    selectedWindow.ppmMax,
+    selectedWindow.ppmMin,
+    selectedWindowTimeRangeForMap,
+  ]);
+
   const tracePointsForMap = useMemo(
-    () => buildDeckTracePointsFromFlowData(selectedFlowDataForMapWithStartFilter),
-    [selectedFlowDataForMapWithStartFilter],
+    () => buildDeckTracePointsFromFlowData(selectedFlowDataForMapWithSelection),
+    [selectedFlowDataForMapWithSelection],
   );
   const isViewportTelemetryActive =
     shouldUseViewportTelemetry &&
@@ -2188,7 +2269,7 @@ export function ResultsPage({
     const buildExportTracePoints = (tracePoints) =>
       tracePoints
         .map((point, index) => {
-          const sourcePoint = selectedFlowDataForMapWithStartFilter[index] || null;
+          const sourcePoint = selectedFlowDataForMapWithSelection[index] || null;
           const targetLatitude =
             toFiniteNumber(sourcePoint?.target_latitude) ??
             toFiniteNumber(sourcePoint?.payload?.target_latitude) ??
@@ -2349,7 +2430,7 @@ export function ResultsPage({
     legendScale,
     selectedMission,
     selectedResultDroneId,
-    selectedFlowDataForMapWithStartFilter,
+    selectedFlowDataForMapWithSelection,
   ]);
 
   const handleExportKMZ = useCallback(async () => {
@@ -2360,7 +2441,7 @@ export function ResultsPage({
     const buildExportTracePoints = (tracePoints) =>
       tracePoints
         .map((point, index) => {
-          const sourcePoint = selectedFlowDataForMapWithStartFilter[index] || null;
+          const sourcePoint = selectedFlowDataForMapWithSelection[index] || null;
           const targetLatitude =
             toFiniteNumber(sourcePoint?.target_latitude) ??
             toFiniteNumber(sourcePoint?.payload?.target_latitude) ??
@@ -3056,7 +3137,7 @@ export function ResultsPage({
     legendScale,
     selectedMission,
     selectedResultDroneId,
-    selectedFlowDataForMapWithStartFilter,
+    selectedFlowDataForMapWithSelection,
     selectedMissionOrthophoto,
   ]);
 
