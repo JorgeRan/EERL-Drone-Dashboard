@@ -3171,6 +3171,128 @@ export function ResultsPage({
     URL.revokeObjectURL(objectUrl);
   }, [analysisExecutedAt, analysisImageDataUris, analysisOutputText]);
 
+  const handleExportAnalysisCsv = useCallback(() => {
+    const quoteCsv = (value) => {
+      if (value === null || value === undefined) {
+        return "";
+      }
+
+      const text = String(value);
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+
+    const buildRow = (values) => values.map((value) => quoteCsv(value)).join(",");
+
+    const timestamp = analysisExecutedAt
+      ? new Date(analysisExecutedAt).toISOString().replace(/[:.]/g, "-")
+      : new Date().toISOString().replace(/[:.]/g, "-");
+
+    const missionName = selectedMission?.name || "Unknown Mission";
+    const missionFlowData = Array.isArray(selectedMission?.flowData)
+      ? [...selectedMission.flowData]
+      : [];
+
+    missionFlowData.sort((left, right) => {
+      const leftTs = Number(left?.timestampMs);
+      const rightTs = Number(right?.timestampMs);
+
+      if (Number.isFinite(leftTs) && Number.isFinite(rightTs)) {
+        return leftTs - rightTs;
+      }
+
+      const leftOrder = Number(left?.sampleOrder);
+      const rightOrder = Number(right?.sampleOrder);
+      if (Number.isFinite(leftOrder) && Number.isFinite(rightOrder)) {
+        return leftOrder - rightOrder;
+      }
+
+      return 0;
+    });
+
+    if (!missionFlowData.length) {
+      return;
+    }
+
+    const csvLines = [];
+    csvLines.push(
+      buildRow([
+        "mission_name",
+        "mission_id",
+        "sample_order",
+        "sample_index",
+        "drone_id",
+        "sensor_mode",
+        "timestamp_iso",
+        "timestamp_ms",
+        "time_local",
+        "latitude",
+        "longitude",
+        "altitude",
+        "target_latitude",
+        "target_longitude",
+        "target_altitude",
+        "methane",
+        "sniffer",
+        "purway",
+        "acetylene",
+        "nitrous_oxide",
+        "ethylene",
+        "distance",
+        "speed",
+        "wind_u",
+        "wind_v",
+        "wind_w",
+        "methane_valid",
+      ]),
+    );
+    missionFlowData.forEach((sample) => {
+      csvLines.push(
+        buildRow([
+          missionName,
+          selectedMission?.id || "",
+          sample.sampleOrder,
+          sample.sampleIndex,
+          sample.droneId,
+          sample.sensorMode,
+          sample.timestampIso,
+          sample.timestampMs,
+          sample.time,
+          sample.latitude,
+          sample.longitude,
+          sample.altitude,
+          sample.target_latitude,
+          sample.target_longitude,
+          sample.target_altitude,
+          sample.methane,
+          sample.sniffer,
+          sample.purway,
+          sample.acetylene,
+          sample.nitrousOxide,
+          sample.ethylene,
+          sample.distance,
+          sample.speed,
+          sample.wind_u,
+          sample.wind_v,
+          sample.wind_w,
+          sample.methane_valid,
+        ]),
+      );
+    });
+
+    const blob = new Blob([csvLines.join("\n")], {
+      type: "text/csv;charset=utf-8",
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `${missionName.replace(/[^a-zA-Z0-9_-]/g, "_") || "mission"}_full_points_${timestamp}.csv`;
+    link.click();
+    URL.revokeObjectURL(objectUrl);
+  }, [
+    analysisExecutedAt,
+    selectedMission,
+  ]);
+
   return (
     <div className="grid h-full w-full gap-4 p-3 lg:grid-cols-[250px_minmax(0,1fr)]">
       {isAnalyzeModalOpen ? (
@@ -3200,6 +3322,20 @@ export function ResultsPage({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium disabled:opacity-50"
+                  style={{
+                    backgroundColor: color.surface,
+                    borderColor: color.borderStrong,
+                    color: color.text,
+                  }}
+                  onClick={handleExportAnalysisCsv}
+                  disabled={!selectedMission?.flowData?.length}
+                >
+                  <Download size={16} />
+                  Export CSV
+                </button>
                 <button
                   type="button"
                   className="flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium disabled:opacity-50"
@@ -4472,6 +4608,8 @@ export function ResultsPage({
                       background:
                         "linear-gradient(150deg, rgba(106, 214, 194, 0.24) 0%, rgba(106, 214, 194, 0.08) 45%, rgba(8, 15, 17, 0.6) 100%)",
                     }}
+                    onClick={handleExportAnalysisCsv}
+                    disabled={!selectedMission?.flowData?.length}
                   >
                     <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.teal }}>
                       .csv
@@ -4617,10 +4755,29 @@ export function ResultsPage({
           sensorsMode={sensorsMode}
           preferredDroneId={selectedDeviceId}
           onClose={() => setCsvModalFile(null)}
-          onComplete={(msg) => {
+          onComplete={async (msg, meta) => {
             setImportMessage(msg);
+            const missionList = await listMissions();
+            setMissionsSample(missionList);
+            await loadTelemetryHistory(telemetryHistoryRange);
+            if (typeof onDataRefresh === "function") {
+              await onDataRefresh();
+            }
+
+            const importedMissionId = meta?.missionId;
+            if (importedMissionId) {
+              const importedMission = missionList.find(
+                (mission) => mission.id === importedMissionId,
+              );
+              if (importedMission) {
+                handleSelectMission({
+                  id: importedMission.id,
+                  primaryDroneId: selectedDeviceId,
+                });
+              }
+            }
+
             window.setTimeout(() => setImportMessage(null), 4000);
-            listMissions().then(setMissionsSample);
           }}
         />
       )}

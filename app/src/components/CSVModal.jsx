@@ -781,6 +781,10 @@ export function CSVImportModal({
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  const emitComplete = (message, meta = {}) => {
+    onComplete?.(message, meta);
+  };
+
   useEffect(() => {
     const normalizedPreferredDroneId = String(preferredDroneId || "").trim();
     const fallbackSensorId = String(sensorsMode[0]?.id || "").trim();
@@ -881,12 +885,21 @@ export function CSVImportModal({
           return;
         }
 
+        const createPayload = await res.json().catch(() => ({}));
+        const createdMissionId =
+          createPayload?.data?.id || createPayload?.id || null;
+
         const rowCount = results.reduce(
           (sum, entry) => sum + entry.data.length,
           0,
         );
-        onComplete?.(
+        emitComplete(
           `Mission "${name}" created with ${rowCount} rows${droppedCount > 0 ? `, ignored ${droppedCount} coordinate outlier${droppedCount === 1 ? "" : "s"}` : ""}`,
+          {
+            action: "create",
+            missionId: createdMissionId,
+            missionName: name,
+          },
         );
         onClose();
       } else if (choice === "existing") {
@@ -918,8 +931,13 @@ export function CSVImportModal({
         const mergedCount = Number(payload.merged || 0);
         const addedCount = Number(payload.added || 0);
         const totalCount = Number(payload.totalIncoming || 0);
-        onComplete?.(
+        emitComplete(
           `Updated "${selectedName}": merged ${mergedCount}, added ${addedCount} (from ${totalCount} CSV rows${droppedCount > 0 ? `, ignored ${droppedCount} outlier${droppedCount === 1 ? "" : "s"}` : ""})`,
+          {
+            action: "update",
+            missionId: selectedId,
+            missionName: selectedName,
+          },
         );
         onClose();
       }

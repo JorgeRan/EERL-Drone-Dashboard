@@ -6,10 +6,14 @@
     "dev:optimized": "node --max-old-space-size=2048 --max-semi-space-size=64 --heapsnapshot-near-heap-limit=2 --expose-gc MQTT-broker.js",
     "simulate": "node simulate-telemetry.js",
     "simulate:optimized": "node --max-old-space-size=1024 --max-semi-space-size=32 --heapsnapshot-near-heap-limit=2 --expose-gc simulate-telemetry.js",
-    "simulate:aeris": "node simulate-aeris-rf.js"
+    "simulate:aeris": "node simulate-aeris-rf.js",
+    "test:heatmap-kmz": "node scripts/test-heatmap-kmz.js",
+    "test:heatmap-kmz:malaga": "node scripts/test-heatmap-kmz.js --mission Malaga"
   },
   "dependencies": {
+    "@turf/turf": "^7.2.0",
     "@serialport/parser-readline": "^13.0.0",
+    "archiver": "^7.0.1",
     "dotenv": "^17.3.1",
     "express": "^5.1.0",
     "mqtt": "^5.15.0",
@@ -18,6 +22,7 @@
     "serialport": "^13.0.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^6.0.1",
+    "tokml": "^0.4.0",
     "usb": "^2.17.0",
     "ws": "^8.18.3"
   }
