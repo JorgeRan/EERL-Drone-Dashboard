@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { color } from "../constants/tailwind";
@@ -305,6 +305,17 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const onSelectionChangeRef = useRef(onSelectionChange);
   const pendingSelectionRef = useRef(null);
   const dragFrameRef = useRef(0);
+  // Selection last committed to the parent (drives the map); dragging only updates local state until "Update View" is clicked.
+  const [localSelection, setLocalSelection] = useState(selection);
+  const [syncedSelection, setSyncedSelection] = useState(selection);
+  const [isUpdating, setIsUpdating] = useState(false);
+  if (selection !== syncedSelection) {
+    setSyncedSelection(selection);
+    setLocalSelection(selection);
+    if (isUpdating) {
+      setIsUpdating(false);
+    }
+  }
   const dataLength = flowData.length;
   const maxIndex = Math.max(dataLength - 1, 0);
   // const fullLeftAxisPeakValue = Math.max(
@@ -318,9 +329,14 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
     0,
   );
   const safeSelection = useMemo(
-    () => clampSelection(selection, dataLength, fullLeftAxisPeakValue),
-    [selection, dataLength, fullLeftAxisPeakValue],
+    () => clampSelection(localSelection, dataLength, fullLeftAxisPeakValue),
+    [localSelection, dataLength, fullLeftAxisPeakValue],
   );
+  const hasPendingViewChange =
+    safeSelection.startIndex !== selection.startIndex ||
+    safeSelection.endIndex !== selection.endIndex ||
+    safeSelection.ppmMin !== selection.ppmMin ||
+    safeSelection.ppmMax !== selection.ppmMax;
   const windowedData = useMemo(
     () => flowData.slice(safeSelection.startIndex, safeSelection.endIndex + 1),
     [flowData, safeSelection],
@@ -425,7 +441,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
       }
 
       selectionRef.current = pendingSelection;
-      onSelectionChangeRef.current(pendingSelection);
+      setLocalSelection(pendingSelection);
     });
   }, []);
 
@@ -439,6 +455,23 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
 
     scheduleSelectionChange(nextSelection);
   }, [dataLength, fullLeftAxisPeakValue, scheduleSelectionChange]);
+
+  const handleUpdateView = useCallback(() => {
+    setIsUpdating(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isUpdating) {
+      return undefined;
+    }
+
+    // Defer the parent update a frame so the spinner paints before the (synchronous) map update runs.
+    const frame = window.requestAnimationFrame(() => {
+      onSelectionChangeRef.current(selectionRef.current);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [isUpdating]);
 
   useEffect(() => {
     const minimumPpmBand = Math.min(
@@ -637,35 +670,35 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
 
   return (
     <div ref={chartContainerRef} className="flex h-full w-full flex-col gap-3">
-      {!resultsPageMode ? 
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p
-            className="text-xs uppercase tracking-[0.18em]"
-            style={{ color: color.green }}
+      {!resultsPageMode ?
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p
+              className="text-xs uppercase tracking-[0.18em]"
+              style={{ color: color.green }}
+            >
+              methane flow
+            </p>
+            <h3
+              className="text-xl font-bold tracking-tight"
+              style={{ color: color.text }}
+            >
+              Combined sensor view
+            </h3>
+            <p
+              className="mt-1 text-xs uppercase tracking-[0.12em]"
+              style={{ color: color.textMuted }}
+            >
+              Window {windowStart?.time ?? "--"} to {windowEnd?.time ?? "--"}
+            </p>
+          </div>
+          <div
+            className="rounded-full px-3 py-1 text-xs font-medium"
+            style={{ backgroundColor: color.orangeSoft, color: color.orange }}
           >
-            methane flow
-          </p>
-          <h3
-            className="text-xl font-bold tracking-tight"
-            style={{ color: color.text }}
-          >
-            Combined sensor view
-          </h3>
-          <p
-            className="mt-1 text-xs uppercase tracking-[0.12em]"
-            style={{ color: color.textMuted }}
-          >
-            Window {windowStart?.time ?? "--"} to {windowEnd?.time ?? "--"}
-          </p>
-        </div>
-        <div
-          className="rounded-full px-3 py-1 text-xs font-medium"
-          style={{ backgroundColor: color.orangeSoft, color: color.orange }}
-        >
-          Live
-        </div>
-      </div> : null}
+            Live
+          </div>
+        </div> : null}
 
       <div className="grid gap-3 sm:grid-cols-2">
         {Object.entries(seriesTheme).map(([sensorKey, theme]) => {
@@ -690,7 +723,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
                 className="mt-1 flex flex-row text-lg font-semibold leading-none"
                 style={{ color: theme.stroke }}
               >
-                  {latestValue.toFixed(1)}
+                {latestValue.toFixed(1)}
                 <p
                   className="ms-1 mt-1.5 text-[11px] uppercase tracking-[0.12em]"
                   style={{ color: color.textMuted }}
@@ -718,7 +751,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
             style={{ color: color.textMuted }}
           >
             <div>
-              <div>T1 = {windowStart?.time ?? "--"}</div> 
+              <div>T1 = {windowStart?.time ?? "--"}</div>
               <div>T2 = {windowEnd?.time ?? "--"}</div>
             </div>
             <div className="flex items-center">
@@ -729,7 +762,7 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
               <div>PPM2 = {safeSelection.ppmMax.toFixed(2)}</div>
             </div>
             <div className="flex items-center">
-                ΔPPM = {(safeSelection.ppmMax - safeSelection.ppmMin).toFixed(2)}
+              ΔPPM = {(safeSelection.ppmMax - safeSelection.ppmMin).toFixed(2)}
             </div>
 
           </div>
@@ -876,7 +909,27 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
             T2
           </span>
         </button>
+
       </div>
+      {isUpdating ? (
+        <div className="flex items-center justify-center ">
+          <div
+            className="h-6 w-6 animate-spin rounded-full border-2 border-t-transparent"
+            style={{
+              borderColor: color.orange,
+              borderTopColor: "transparent",
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={handleUpdateView}
+          disabled={!hasPendingViewChange}
+          className="inline-block align-middle rounded bg-orange-500 px-3 py-1 text-white text-xs hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-50">
+          Update View
+        </button>
+      )}
     </div>
   );
 }

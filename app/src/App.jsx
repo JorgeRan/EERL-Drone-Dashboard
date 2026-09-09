@@ -655,9 +655,10 @@ function App() {
   );
   const [selectedWindow, setSelectedWindow] = useState({
     startIndex: 0,
-    endIndex: 1,
+    // Unbounded until the user narrows it via the chart, so live traces aren't clipped by default.
+    endIndex: Infinity,
     ppmMin: 0,
-    ppmMax: 1,
+    ppmMax: Infinity,
   });
   const selectedWindowForDashboard = useMemo(() => {
     const dataLength = dashboardChartFlowData.length;
@@ -1770,7 +1771,7 @@ function App() {
                     </div>
                   </div>
                   <COMPort />
-                  <div
+                  {/* <div
                     className="flex flex-row h-full items-center rounded-lg border p-3 gap-4"
                     style={{
                       backgroundColor: color.card,
@@ -1792,12 +1793,12 @@ function App() {
                       color={color}
                     /> */}
                     
-                    <SignalStatus
+                    {/* <SignalStatus
                       signalHistory={sampleSignalHistory}
                       seqHistory={sampleSeqHistory}
                       color={color}
-                    />
-                  </div>
+                    /> 
+                  </div> */}
                 </div>
                 
                 <MeasurementControls
@@ -1814,7 +1815,7 @@ function App() {
 
               {/* <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]"> */}
                <div className="grid w-full gap-3 ">
-                <DeckMap
+                <Map
                   traceDataset={EMPTY_FEATURE_COLLECTION}
                   tracePoints={dashboardMapTracePoints}
                   selectedDroneId={selectedDeviceId}

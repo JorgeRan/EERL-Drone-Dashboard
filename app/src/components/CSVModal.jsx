@@ -342,7 +342,7 @@ const parseStandardCsvToMissionResults = (
   const latIdx = idx("rtk_lat", "latitude", "lat", "center_lat", "gimbal_lat", "ref_lat");
   const lonIdx = idx("rtk_lon", "longitude", "lon", "lng", "center_lon", "gimbal_lon", "ref_lon");
   const altIdx = idx("rtk_hfsl", "altitude", "alt", "center_hfsl", "gimbal_hfsl", "ref_hfsl");
-  const distIdx = idx("distance");
+  const distIdx = idx("rec_distance_filled", "Distance [m]", "distance");
   const targetLatIdx = idx(
     "dest_latitude",
     "target_latitude",

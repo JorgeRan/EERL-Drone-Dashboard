@@ -37,6 +37,7 @@ import { MissionModal } from "./MissionModal";
 import { CSVImportModal } from "./CSVModal";
 import { DeckMap } from "./DeckMap";
 import { Map } from "./Map";
+import { Distance } from "./3DDistance";
 import { buildDeckTracePointsFromFlowData } from "../shared/deckTraceData";
 import { getScaledMethaneColor } from "../constants/methaneScale";
 import JSZip from "jszip";
@@ -983,6 +984,623 @@ const normalizeTelemetryHistory = (rows) =>
       sampleIndex: index + 1,
     }));
 
+const clampNumber = (value, minimum, maximum) =>
+  Math.min(Math.max(value, minimum), maximum);
+
+const hexToRgb = (hexColor) => {
+  const safe = String(hexColor || "").replace("#", "");
+  if (safe.length !== 6) {
+    return { r: 56, g: 189, b: 248 };
+  }
+
+  return {
+    r: Number.parseInt(safe.slice(0, 2), 16),
+    g: Number.parseInt(safe.slice(2, 4), 16),
+    b: Number.parseInt(safe.slice(4, 6), 16),
+  };
+};
+
+const formatMissionReportTimestamp = (value) => {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return date.toLocaleString();
+};
+
+const MISSION_REPORT_PANEL_LABELS = {
+  full: "full_report",
+  concentration: "concentration_panel",
+  altitude: "altitude_panel",
+  workflow: "workflow_panel",
+  summary: "summary_panel",
+};
+
+const extractMissionReportPanelCanvas = (sourceCanvas, panelBounds, padding = 18) => {
+  if (!sourceCanvas || !panelBounds) {
+    return sourceCanvas;
+  }
+
+  const sourceWidth = Number(sourceCanvas.width || 0);
+  const sourceHeight = Number(sourceCanvas.height || 0);
+  const panelX = Math.max(0, Math.floor(Number(panelBounds.x || 0)));
+  const panelY = Math.max(0, Math.floor(Number(panelBounds.y || 0)));
+  const panelWidth = Math.max(1, Math.floor(Number(panelBounds.w || sourceWidth)));
+  const panelHeight = Math.max(1, Math.floor(Number(panelBounds.h || sourceHeight)));
+  const safeWidth = Math.min(panelWidth, Math.max(1, sourceWidth - panelX));
+  const safeHeight = Math.min(panelHeight, Math.max(1, sourceHeight - panelY));
+
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = safeWidth + padding * 2;
+  outCanvas.height = safeHeight + padding * 2;
+  const outCtx = outCanvas.getContext("2d");
+
+  if (!outCtx) {
+    throw new Error("Unable to create panel export canvas.");
+  }
+
+  const panelGradient = outCtx.createLinearGradient(0, 0, 0, outCanvas.height);
+  panelGradient.addColorStop(0, "#07131e");
+  panelGradient.addColorStop(1, "#0b1b2a");
+  outCtx.fillStyle = panelGradient;
+  outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
+  outCtx.drawImage(
+    sourceCanvas,
+    panelX,
+    panelY,
+    safeWidth,
+    safeHeight,
+    padding,
+    padding,
+    safeWidth,
+    safeHeight,
+  );
+
+  return outCanvas;
+};
+
+const createMissionReportCanvas = ({
+  mission,
+  flowData,
+  legendScale,
+  selectedResultDroneId,
+}) => {
+  const width = 1920;
+  const height = 1080;
+  const panelBounds = {
+    concentration: { x: 44, y: 124, w: 1234, h: 610 },
+    altitude: { x: 44, y: 760, w: 710, h: 280 },
+    workflow: { x: 770, y: 760, w: 508, h: 280 },
+    summary: { x: 1316, y: 124, w: 560, h: 916 },
+  };
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    throw new Error("Unable to create report canvas.");
+  }
+
+  const lowerLimit = Number(legendScale?.lowerLimit ?? 0);
+  const upperLimit = Math.max(lowerLimit + 0.1, Number(legendScale?.upperLimit ?? 200));
+
+  const rows = Array.isArray(flowData)
+    ? [...flowData].sort((left, right) => Number(left?.timestampMs ?? 0) - Number(right?.timestampMs ?? 0))
+    : [];
+
+  const mappedPoints = rows
+    .map((row, index) => {
+      const telemetryMetrics = extractTelemetryMetrics(row);
+      const latitude = toFiniteNumber(row?.latitude);
+      const longitude = toFiniteNumber(row?.longitude);
+      const altitude =
+        toFiniteNumber(row?.altitude) ??
+        toFiniteNumber(row?.target_altitude) ??
+        toFiniteNumber(row?.payload?.target_altitude);
+      const methane =
+        toFiniteNumber(telemetryMetrics?.methane) ??
+        toFiniteNumber(row?.methane) ??
+        0;
+      const timestampMs = Number(row?.timestampMs);
+      return {
+        index,
+        latitude,
+        longitude,
+        altitude,
+        methane,
+        timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
+        timestampIso: row?.timestampIso || null,
+        droneId: row?.droneId || "unknown",
+      };
+    })
+    .filter((point) => point.latitude !== null && point.longitude !== null);
+
+  const methaneValues = mappedPoints.map((point) => Number(point.methane || 0));
+  const methanePeak = methaneValues.length ? Math.max(...methaneValues) : 0;
+  const methaneRenderUpper =
+    methanePeak > 0
+      ? Math.max(lowerLimit + 0.1, Math.min(upperLimit, methanePeak * 1.05))
+      : upperLimit;
+  const methaneAvg = methaneValues.length
+    ? methaneValues.reduce((sum, value) => sum + value, 0) / methaneValues.length
+    : 0;
+  const altitudeValues = mappedPoints
+    .map((point) => point.altitude)
+    .filter((value) => value !== null);
+  const maxAltitude = altitudeValues.length ? Math.max(...altitudeValues) : 0;
+  const minAltitude = altitudeValues.length ? Math.min(...altitudeValues) : 0;
+
+  let totalDistanceMeters = 0;
+  for (let i = 1; i < mappedPoints.length; i += 1) {
+    totalDistanceMeters += calculateDistanceMeters(
+      mappedPoints[i - 1].latitude,
+      mappedPoints[i - 1].longitude,
+      mappedPoints[i].latitude,
+      mappedPoints[i].longitude,
+    );
+  }
+
+  const topGradient = ctx.createLinearGradient(0, 0, 0, height);
+  topGradient.addColorStop(0, "#081521");
+  topGradient.addColorStop(0.55, "#0b1f2e");
+  topGradient.addColorStop(1, "#0f2434");
+  ctx.fillStyle = topGradient;
+  ctx.fillRect(0, 0, width, height);
+
+  const atmosphere = ctx.createRadialGradient(1450, 240, 100, 1450, 240, 800);
+  atmosphere.addColorStop(0, "rgba(87, 155, 255, 0.22)");
+  atmosphere.addColorStop(1, "rgba(8, 21, 33, 0)");
+  ctx.fillStyle = atmosphere;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
+  ctx.font = "700 46px 'Segoe UI', sans-serif";
+  ctx.fillText("DRONE FLIGHT PATH AND METHANE MEASUREMENTS", 44, 68);
+
+  ctx.font = "500 24px 'Segoe UI', sans-serif";
+  ctx.fillStyle = "rgba(216, 236, 255, 0.88)";
+  ctx.fillText(
+    `${mission?.name || "Selected Mission"} | ${selectedResultDroneId === ALL_DRONES_OPTION ? "All Drones" : selectedResultDroneId}`,
+    44,
+    102,
+  );
+
+  const mapX = panelBounds.concentration.x;
+  const mapY = panelBounds.concentration.y;
+  const mapW = panelBounds.concentration.w;
+  const mapH = panelBounds.concentration.h;
+  ctx.fillStyle = "rgba(6, 15, 24, 0.58)";
+  ctx.strokeStyle = "rgba(148, 188, 220, 0.48)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(mapX, mapY, mapW, mapH, 20);
+  ctx.fill();
+  ctx.stroke();
+
+  if (mappedPoints.length >= 2) {
+    const latitudes = mappedPoints.map((point) => point.latitude);
+    const longitudes = mappedPoints.map((point) => point.longitude);
+    const minLat = Math.min(...latitudes);
+    const maxLat = Math.max(...latitudes);
+    const minLon = Math.min(...longitudes);
+    const maxLon = Math.max(...longitudes);
+    const latSpan = Math.max(maxLat - minLat, 1e-7);
+    const lonSpan = Math.max(maxLon - minLon, 1e-7);
+    const mapPadding = 26;
+
+    const toMapX = (longitude) =>
+      mapX +
+      mapPadding +
+      ((longitude - minLon) / lonSpan) * (mapW - mapPadding * 2);
+    const toMapY = (latitude) =>
+      mapY +
+      mapPadding +
+      (1 - (latitude - minLat) / latSpan) * (mapH - mapPadding * 2);
+
+    const sampleStride = Math.max(1, Math.floor(mappedPoints.length / 1200));
+    const sampledPoints = mappedPoints.filter((_, index) => index % sampleStride === 0);
+    sampledPoints.forEach((point) => {
+      const x = toMapX(point.longitude);
+      const y = toMapY(point.latitude);
+      const methaneRatio = clampNumber((point.methane - lowerLimit) / (methaneRenderUpper - lowerLimit), 0, 1);
+      const methaneHex = getScaledMethaneColor(point.methane, lowerLimit, upperLimit);
+      const methaneRgb = hexToRgb(methaneHex);
+      const haloRadius = 8 + methaneRatio * 26;
+
+      const heatGradient = ctx.createRadialGradient(x, y, 1, x, y, haloRadius);
+      heatGradient.addColorStop(0, `rgba(${methaneRgb.r}, ${methaneRgb.g}, ${methaneRgb.b}, 0.55)`);
+      heatGradient.addColorStop(1, `rgba(${methaneRgb.r}, ${methaneRgb.g}, ${methaneRgb.b}, 0)`);
+      ctx.fillStyle = heatGradient;
+      ctx.beginPath();
+      ctx.arc(x, y, haloRadius, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Draw pseudo-3D concentration columns sorted back-to-front for depth.
+    const drawColumns = [...sampledPoints].sort(
+      (left, right) => toMapY(left.latitude) - toMapY(right.latitude),
+    );
+    drawColumns.forEach((point) => {
+      const baseX = toMapX(point.longitude);
+      const baseY = toMapY(point.latitude);
+      const methaneRatio =
+        methanePeak > 0
+          ? clampNumber(point.methane / methanePeak, 0, 1)
+          : 0;
+      if (methaneRatio <= 0.005) {
+        return;
+      }
+
+      const methaneHex = getScaledMethaneColor(point.methane, lowerLimit, upperLimit);
+      const methaneRgb = hexToRgb(methaneHex);
+      const columnWidth = 3 + methaneRatio * 5;
+      const columnHeight = 12 + methaneRatio * 185;
+      const tiltX = 2 + methaneRatio * 4;
+      const tiltY = -2;
+      const topY = baseY - columnHeight;
+
+      ctx.fillStyle = `rgba(${methaneRgb.r}, ${methaneRgb.g}, ${methaneRgb.b}, 0.22)`;
+      ctx.beginPath();
+      ctx.ellipse(baseX + 3, baseY + 2, columnWidth + 2, Math.max(2, columnWidth * 0.55), 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      const sideGradient = ctx.createLinearGradient(baseX, topY, baseX, baseY);
+      sideGradient.addColorStop(
+        0,
+        `rgba(${Math.round(methaneRgb.r * 0.95)}, ${Math.round(methaneRgb.g * 0.95)}, ${Math.round(methaneRgb.b * 0.95)}, 0.9)`,
+      );
+      sideGradient.addColorStop(
+        1,
+        `rgba(${Math.round(methaneRgb.r * 0.55)}, ${Math.round(methaneRgb.g * 0.55)}, ${Math.round(methaneRgb.b * 0.55)}, 0.88)`,
+      );
+      ctx.fillStyle = sideGradient;
+      ctx.beginPath();
+      ctx.moveTo(baseX - columnWidth, baseY);
+      ctx.lineTo(baseX + columnWidth, baseY);
+      ctx.lineTo(baseX + columnWidth + tiltX, topY + tiltY);
+      ctx.lineTo(baseX - columnWidth + tiltX, topY + tiltY);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(baseX + columnWidth, baseY);
+      ctx.lineTo(baseX + columnWidth + tiltX, topY + tiltY);
+      ctx.stroke();
+
+      const topGradient = ctx.createRadialGradient(
+        baseX + tiltX,
+        topY + tiltY,
+        1,
+        baseX + tiltX,
+        topY + tiltY,
+        columnWidth + 2,
+      );
+      topGradient.addColorStop(0, `rgba(255, 255, 255, 0.92)`);
+      topGradient.addColorStop(0.45, `rgba(${methaneRgb.r}, ${methaneRgb.g}, ${methaneRgb.b}, 0.95)`);
+      topGradient.addColorStop(1, `rgba(${Math.round(methaneRgb.r * 0.7)}, ${Math.round(methaneRgb.g * 0.7)}, ${Math.round(methaneRgb.b * 0.7)}, 0.95)`);
+      ctx.fillStyle = topGradient;
+      ctx.beginPath();
+      ctx.ellipse(
+        baseX + tiltX,
+        topY + tiltY,
+        columnWidth + 0.7,
+        Math.max(2, columnWidth * 0.55),
+        0,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+
+      if (methaneRatio >= 0.9) {
+        ctx.strokeStyle = "rgba(255, 208, 120, 0.72)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(baseX + tiltX, topY + tiltY - 3);
+        ctx.lineTo(baseX + tiltX, topY + tiltY - 14);
+        ctx.stroke();
+      }
+    });
+
+    const pointsByDroneId = mappedPoints.reduce((accumulator, point) => {
+      if (!accumulator[point.droneId]) {
+        accumulator[point.droneId] = [];
+      }
+      accumulator[point.droneId].push(point);
+      return accumulator;
+    }, {});
+
+    const droneStrokePalette = ["#7dd3fc", "#34d399", "#f59e0b", "#f97316", "#a78bfa", "#22d3ee"];
+    Object.entries(pointsByDroneId).forEach(([droneId, points], droneIndex) => {
+      if (points.length < 2) {
+        return;
+      }
+
+      const strokeColor = droneStrokePalette[droneIndex % droneStrokePalette.length];
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = strokeColor;
+      ctx.globalAlpha = 0.72;
+      ctx.shadowColor = "rgba(56, 189, 248, 0.28)";
+      ctx.shadowBlur = 5;
+      ctx.beginPath();
+      points.forEach((point, pointIndex) => {
+        const x = toMapX(point.longitude);
+        const y = toMapY(point.latitude);
+        if (pointIndex === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+
+      const start = points[0];
+      const end = points[points.length - 1];
+      const startX = toMapX(start.longitude);
+      const startY = toMapY(start.latitude);
+      const endX = toMapX(end.longitude);
+      const endY = toMapY(end.latitude);
+
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.beginPath();
+      ctx.arc(startX, startY, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(endX, endY, 6, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = "600 16px 'Segoe UI', sans-serif";
+      ctx.fillStyle = strokeColor;
+      ctx.fillText(droneId, endX + 8, endY - 8);
+    });
+
+    const legendX = mapX + 26;
+    const legendY = mapY + 24;
+    const legendW = 260;
+    const legendH = 254;
+    ctx.fillStyle = "rgba(6, 15, 24, 0.72)";
+    ctx.strokeStyle = "rgba(186, 216, 242, 0.45)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(legendX, legendY, legendW, legendH, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = "600 30px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(235, 248, 255, 0.96)";
+    ctx.fillText("Legend", legendX + 16, legendY + 40);
+
+    ctx.font = "500 20px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(193, 223, 245, 0.92)";
+    ctx.fillText("Flight Path + 3D Columns", legendX + 16, legendY + 80);
+    ctx.fillText("Methane Scale", legendX + 16, legendY + 132);
+
+    ctx.strokeStyle = "#60a5fa";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(legendX + 20, legendY + 94);
+    ctx.lineTo(legendX + 124, legendY + 94);
+    ctx.stroke();
+
+    const scaleGradient = ctx.createLinearGradient(0, legendY + 158, 0, legendY + 232);
+    scaleGradient.addColorStop(0, getScaledMethaneColor(methaneRenderUpper, lowerLimit, upperLimit));
+    scaleGradient.addColorStop(0.5, getScaledMethaneColor((methaneRenderUpper + lowerLimit) / 2, lowerLimit, upperLimit));
+    scaleGradient.addColorStop(1, getScaledMethaneColor(lowerLimit, lowerLimit, upperLimit));
+    ctx.fillStyle = scaleGradient;
+    ctx.fillRect(legendX + 20, legendY + 158, 24, 74);
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.strokeRect(legendX + 20, legendY + 158, 24, 74);
+
+    ctx.font = "500 18px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(233, 246, 255, 0.93)";
+    ctx.fillText(`High ${methaneRenderUpper.toFixed(1)}`, legendX + 58, legendY + 174);
+    ctx.fillText(`Mid ${((methaneRenderUpper + lowerLimit) / 2).toFixed(1)}`, legendX + 58, legendY + 196);
+    ctx.fillText(`Low ${lowerLimit.toFixed(1)}`, legendX + 58, legendY + 220);
+  } else {
+    ctx.font = "600 28px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(190, 216, 236, 0.82)";
+    ctx.fillText("Not enough geospatial points to draw mission trace.", mapX + 34, mapY + 80);
+  }
+
+  const profileX = panelBounds.altitude.x;
+  const profileY = panelBounds.altitude.y;
+  const profileW = panelBounds.altitude.w;
+  const profileH = panelBounds.altitude.h;
+  ctx.fillStyle = "rgba(6, 15, 24, 0.64)";
+  ctx.strokeStyle = "rgba(148, 188, 220, 0.45)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(profileX, profileY, profileW, profileH, 18);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(239, 249, 255, 0.96)";
+  ctx.font = "600 30px 'Segoe UI', sans-serif";
+  ctx.fillText("Vertical Profile", profileX + 20, profileY + 40);
+
+  const graphX = profileX + 20;
+  const graphY = profileY + 62;
+  const graphW = profileW - 40;
+  const graphH = profileH - 88;
+  ctx.strokeStyle = "rgba(186, 216, 242, 0.2)";
+  ctx.lineWidth = 1;
+  for (let gridIndex = 0; gridIndex <= 4; gridIndex += 1) {
+    const y = graphY + (graphH * gridIndex) / 4;
+    ctx.beginPath();
+    ctx.moveTo(graphX, y);
+    ctx.lineTo(graphX + graphW, y);
+    ctx.stroke();
+  }
+
+  const altitudePoints = mappedPoints.filter((point) => point.altitude !== null);
+  if (altitudePoints.length >= 2) {
+    const altitudeSpan = Math.max(maxAltitude - minAltitude, 1);
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    altitudePoints.forEach((point, index) => {
+      const x = graphX + (index / (altitudePoints.length - 1)) * graphW;
+      const y = graphY + (1 - (point.altitude - minAltitude) / altitudeSpan) * graphH;
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.stroke();
+  }
+
+  ctx.font = "500 18px 'Segoe UI', sans-serif";
+  ctx.fillStyle = "rgba(206, 231, 247, 0.9)";
+  ctx.fillText(`Distance ${(totalDistanceMeters / 1000).toFixed(2)} km`, graphX, graphY + graphH + 26);
+  ctx.fillText(`Altitude ${minAltitude.toFixed(1)} m to ${maxAltitude.toFixed(1)} m`, graphX + 260, graphY + graphH + 26);
+
+  const workflowX = panelBounds.workflow.x;
+  const workflowY = panelBounds.workflow.y;
+  const workflowW = panelBounds.workflow.w;
+  const workflowH = panelBounds.workflow.h;
+  ctx.fillStyle = "rgba(6, 15, 24, 0.64)";
+  ctx.strokeStyle = "rgba(148, 188, 220, 0.45)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(workflowX, workflowY, workflowW, workflowH, 18);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(239, 249, 255, 0.96)";
+  ctx.font = "600 30px 'Segoe UI', sans-serif";
+  ctx.fillText("Methane Data Workflow", workflowX + 18, workflowY + 40);
+
+  const workflowSteps = [
+    "Raw Measurements",
+    "Normalize by Distance",
+    "Background Correction",
+    "Corrected Methane Map",
+  ];
+  const stepBoxW = 108;
+  const stepGap = 14;
+  workflowSteps.forEach((label, index) => {
+    const x = workflowX + 18 + index * (stepBoxW + stepGap);
+    const y = workflowY + 88;
+    ctx.fillStyle = "rgba(11, 32, 48, 0.78)";
+    ctx.strokeStyle = "rgba(170, 213, 243, 0.52)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(x, y, stepBoxW, 128, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(240, 249, 255, 0.94)";
+    ctx.font = "500 16px 'Segoe UI', sans-serif";
+    const words = label.split(" ");
+    let line = "";
+    let lineIndex = 0;
+    words.forEach((word, wordIndex) => {
+      const test = line ? `${line} ${word}` : word;
+      if (ctx.measureText(test).width > stepBoxW - 16 && line) {
+        ctx.fillText(line, x + 8, y + 34 + lineIndex * 20);
+        line = word;
+        lineIndex += 1;
+      } else {
+        line = test;
+      }
+
+      if (wordIndex === words.length - 1) {
+        ctx.fillText(line, x + 8, y + 34 + lineIndex * 20);
+      }
+    });
+
+    if (index < workflowSteps.length - 1) {
+      const arrowX = x + stepBoxW + 4;
+      const arrowY = y + 64;
+      ctx.strokeStyle = "rgba(170, 213, 243, 0.75)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(arrowX, arrowY);
+      ctx.lineTo(arrowX + 10, arrowY);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(arrowX + 7, arrowY - 4);
+      ctx.lineTo(arrowX + 12, arrowY);
+      ctx.lineTo(arrowX + 7, arrowY + 4);
+      ctx.stroke();
+    }
+  });
+
+  const summaryX = panelBounds.summary.x;
+  const summaryY = panelBounds.summary.y;
+  const summaryW = panelBounds.summary.w;
+  const summaryH = panelBounds.summary.h;
+  ctx.fillStyle = "rgba(6, 15, 24, 0.7)";
+  ctx.strokeStyle = "rgba(148, 188, 220, 0.5)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(summaryX, summaryY, summaryW, summaryH, 20);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(241, 250, 255, 0.97)";
+  ctx.font = "700 34px 'Segoe UI', sans-serif";
+  ctx.fillText("Mission Summary", summaryX + 22, summaryY + 50);
+
+  const summaryRows = [
+    ["Mission", mission?.name || "-"],
+    ["Mission ID", mission?.id || "-"],
+    ["Start", formatMissionReportTimestamp(mission?.startTs)],
+    ["End", formatMissionReportTimestamp(mission?.endTs)],
+    ["Drone Filter", selectedResultDroneId === ALL_DRONES_OPTION ? "All Drones" : selectedResultDroneId],
+    ["Samples", `${mappedPoints.length.toLocaleString()}`],
+    ["Distance", `${(totalDistanceMeters / 1000).toFixed(2)} km`],
+    ["Peak Methane", `${methanePeak.toFixed(2)} ppm`],
+    ["Average Methane", `${methaneAvg.toFixed(2)} ppm`],
+    ["Altitude Range", `${minAltitude.toFixed(1)} m to ${maxAltitude.toFixed(1)} m`],
+  ];
+
+  let rowY = summaryY + 96;
+  summaryRows.forEach(([label, value]) => {
+    ctx.font = "500 18px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(163, 204, 233, 0.9)";
+    ctx.fillText(label, summaryX + 22, rowY);
+    ctx.font = "600 20px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(237, 247, 255, 0.95)";
+    const valueText = String(value ?? "-");
+    const clipped =
+      valueText.length > 38 ? `${valueText.slice(0, 35)}...` : valueText;
+    ctx.fillText(clipped, summaryX + 194, rowY);
+    rowY += 46;
+  });
+
+  const badgeY = summaryY + summaryH - 90;
+  const confidenceScore = clampNumber(
+    mappedPoints.length ? Math.round((mappedPoints.length / 1500) * 100) : 0,
+    0,
+    100,
+  );
+  ctx.fillStyle = "rgba(8, 28, 44, 0.8)";
+  ctx.strokeStyle = "rgba(120, 196, 244, 0.55)";
+  ctx.beginPath();
+  ctx.roundRect(summaryX + 22, badgeY, summaryW - 44, 58, 14);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "rgba(191, 232, 255, 0.94)";
+  ctx.font = "500 18px 'Segoe UI', sans-serif";
+  ctx.fillText("Processing confidence", summaryX + 40, badgeY + 36);
+  ctx.fillStyle = "rgba(252, 191, 73, 0.98)";
+  ctx.font = "700 24px 'Segoe UI', sans-serif";
+  ctx.fillText(`${confidenceScore}%`, summaryX + summaryW - 120, badgeY + 38);
+
+  return { canvas, panelBounds };
+};
+
 export function ResultsPage({
   devices = [],
   sensorsMode = [],
@@ -1001,6 +1619,7 @@ export function ResultsPage({
   const [selectedResultDroneId, setSelectedResultDroneId] =
     useState(ALL_DRONES_OPTION);
   const [missionsSample, setMissionsSample] = useState([]);
+  const [isMissionsListLoading, setIsMissionsListLoading] = useState(true);
   const [telemetryHistorySample, setTelemetryHistorySample] = useState([]);
   const [telemetryHistoryRange, setTelemetryHistoryRange] = useState({
     from: "",
@@ -1047,6 +1666,7 @@ export function ResultsPage({
   const [isReplayPlaying, setIsReplayPlaying] = useState(false);
   const [isAnalyzeModalOpen, setIsAnalyzeModalOpen] = useState(false);
   const [isNotebookRunning, setIsNotebookRunning] = useState(false);
+  const [isReportExporting, setIsReportExporting] = useState(false);
   const [analysisOutputText, setAnalysisOutputText] = useState("");
   const [analysisImageDataUris, setAnalysisImageDataUris] = useState([]);
   const [analysisError, setAnalysisError] = useState("");
@@ -1370,8 +1990,10 @@ export function ResultsPage({
 
   useEffect(() => {
     const loadData = async () => {
+      setIsMissionsListLoading(true);
       const [loadedMissions] = await Promise.all([listMissions()]);
       setMissionsSample(loadedMissions);
+      setIsMissionsListLoading(false);
       await loadTelemetryHistory({ from: "", to: "" });
     };
     void loadData();
@@ -2731,7 +3353,7 @@ export function ResultsPage({
             const kernel =
               Math.exp(
                 -distanceSquared /
-                  (2 * sigma * sigma)
+                (2 * sigma * sigma)
               );
 
             const pixelIndex =
@@ -3171,7 +3793,7 @@ export function ResultsPage({
     URL.revokeObjectURL(objectUrl);
   }, [analysisExecutedAt, analysisImageDataUris, analysisOutputText]);
 
-  const handleExportAnalysisCsv = useCallback(() => {
+  const handleDownloadMissionCsv = useCallback((mission) => {
     const quoteCsv = (value) => {
       if (value === null || value === undefined) {
         return "";
@@ -3183,13 +3805,9 @@ export function ResultsPage({
 
     const buildRow = (values) => values.map((value) => quoteCsv(value)).join(",");
 
-    const timestamp = analysisExecutedAt
-      ? new Date(analysisExecutedAt).toISOString().replace(/[:.]/g, "-")
-      : new Date().toISOString().replace(/[:.]/g, "-");
-
-    const missionName = selectedMission?.name || "Unknown Mission";
-    const missionFlowData = Array.isArray(selectedMission?.flowData)
-      ? [...selectedMission.flowData]
+    const missionName = mission?.name || "Unknown Mission";
+    const missionFlowData = Array.isArray(mission?.flowData)
+      ? [...mission.flowData]
       : [];
 
     missionFlowData.sort((left, right) => {
@@ -3249,7 +3867,7 @@ export function ResultsPage({
       csvLines.push(
         buildRow([
           missionName,
-          selectedMission?.id || "",
+          mission?.id || "",
           sample.sampleOrder,
           sample.sampleIndex,
           sample.droneId,
@@ -3282,15 +3900,84 @@ export function ResultsPage({
     const blob = new Blob([csvLines.join("\n")], {
       type: "text/csv;charset=utf-8",
     });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = objectUrl;
     link.download = `${missionName.replace(/[^a-zA-Z0-9_-]/g, "_") || "mission"}_full_points_${timestamp}.csv`;
     link.click();
     URL.revokeObjectURL(objectUrl);
+  }, []);
+
+  const handleExportAnalysisCsv = useCallback(() => {
+    handleDownloadMissionCsv(selectedMission);
   }, [
-    analysisExecutedAt,
+    handleDownloadMissionCsv,
     selectedMission,
+  ]);
+
+  const handleExportMissionReportPng = useCallback(async (panelKey = "full") => {
+    if (!selectedMission || isReportExporting) {
+      return;
+    }
+
+    const exportFlowData =
+      selectedFlowDataForMapWithSelection.length > 0
+        ? selectedFlowDataForMapWithSelection
+        : selectedFlowData;
+
+    if (!exportFlowData.length) {
+      return;
+    }
+
+    setIsReportExporting(true);
+
+    try {
+      const { canvas: reportCanvas, panelBounds } = createMissionReportCanvas({
+        mission: selectedMission,
+        flowData: exportFlowData,
+        legendScale,
+        selectedResultDroneId,
+      });
+      const selectedPanelBounds = panelKey === "full" ? null : panelBounds[panelKey] || null;
+      const exportCanvas = selectedPanelBounds
+        ? extractMissionReportPanelCanvas(reportCanvas, selectedPanelBounds)
+        : reportCanvas;
+      const blob = await canvasToBlob(exportCanvas, "image/png");
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const missionLabel = (selectedMission?.name || "mission")
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+      const droneSuffix =
+        selectedResultDroneId !== ALL_DRONES_OPTION
+          ? `_${selectedResultDroneId}`
+          : "";
+
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      const panelLabel =
+        MISSION_REPORT_PANEL_LABELS[panelKey] || MISSION_REPORT_PANEL_LABELS.full;
+      link.download = `${missionLabel || "mission"}${droneSuffix}_${timestamp}_${panelLabel}.png`;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      setImportMessage(
+        error instanceof Error
+          ? `Report export failed: ${error.message}`
+          : "Report export failed.",
+      );
+    } finally {
+      setIsReportExporting(false);
+    }
+  }, [
+    isReportExporting,
+    legendScale,
+    selectedFlowData,
+    selectedFlowDataForMapWithSelection,
+    selectedMission,
+    selectedResultDroneId,
   ]);
 
   return (
@@ -3763,6 +4450,22 @@ export function ResultsPage({
               </div>
             </div>
 
+            {isMissionsListLoading ? (
+              <div
+                className="flex flex-col items-center justify-center gap-2 rounded-md border py-6"
+                style={{ borderColor: color.border, color: color.textMuted }}
+              >
+                <div
+                  className="h-6 w-6 animate-spin rounded-full border-2 border-t-transparent"
+                  style={{
+                    borderColor: color.orange,
+                    borderTopColor: "transparent",
+                  }}
+                />
+                <p className="text-xs">Loading saved missions...</p>
+              </div>
+            ) : null}
+
             {savedMissions.length ? (
               <div className="pt-2">
                 <div className="mb-2 flex items-center gap-2">
@@ -3861,6 +4564,24 @@ export function ResultsPage({
                       }}
                     >
                       {isContinuing ? "Continuing" : "Continue"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleDownloadMissionCsv(mission);
+                      }}
+                      disabled={!mission?.flowData?.length}
+                      className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold"
+                      style={{
+                        backgroundColor: color.surface,
+                        color: color.text,
+                        border: `1px solid ${color.borderStrong}`,
+                        opacity: mission?.flowData?.length ? 1 : 0.6,
+                      }}
+                    >
+                      <Download size={12} />
+                      CSV
                     </button>
                   </div>
                   <button
@@ -4600,6 +5321,146 @@ export function ResultsPage({
                 </div>
 
                 <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  {/* <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px] disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: "rgba(240, 193, 93, 0.5)",
+                      background:
+                        "linear-gradient(150deg, rgba(240, 193, 93, 0.3) 0%, rgba(240, 193, 93, 0.1) 45%, rgba(22, 18, 10, 0.58) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
+                    }}
+                    onClick={() => {
+                      void handleExportMissionReportPng("full");
+                    }}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
+                  >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.warning }}>
+                      .png
+                    </div>
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      {isReportExporting ? "Rendering..." : "Mission Report"}
+                    </p>
+                  </button> */}
+
+                  {/* <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px] disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: "rgba(56, 189, 248, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(56, 189, 248, 0.28) 0%, rgba(56, 189, 248, 0.08) 45%, rgba(8, 20, 28, 0.58) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
+                    }}
+                    onClick={() => {
+                      void handleExportMissionReportPng("concentration");
+                    }}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
+                  >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.blue }}>
+                      .png
+                    </div>
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      Concentration
+                    </p>
+                  </button> */}
+
+                  {/* <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px] disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: "rgba(52, 211, 153, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(52, 211, 153, 0.28) 0%, rgba(52, 211, 153, 0.08) 45%, rgba(8, 20, 20, 0.58) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
+                    }}
+                    onClick={() => {
+                      void handleExportMissionReportPng("altitude");
+                    }}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
+                  >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.green }}>
+                      .png
+                    </div>
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      Altitude
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px] disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: "rgba(167, 139, 250, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(167, 139, 250, 0.28) 0%, rgba(167, 139, 250, 0.08) 45%, rgba(18, 12, 28, 0.58) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
+                    }}
+                    onClick={() => {
+                      void handleExportMissionReportPng("summary");
+                    }}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
+                  >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: "#8b5cf6" }}>
+                      .png
+                    </div>
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      Summary
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px] disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: "rgba(251, 146, 60, 0.45)",
+                      background:
+                        "linear-gradient(150deg, rgba(251, 146, 60, 0.28) 0%, rgba(251, 146, 60, 0.08) 45%, rgba(24, 16, 10, 0.58) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
+                    }}
+                    onClick={() => {
+                      void handleExportMissionReportPng("workflow");
+                    }}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
+                  >
+                    <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.orange }}>
+                      .png
+                    </div>
+                    <p
+                      className="mt-1 text-sm font-semibold"
+                      style={{ color: "#ffffff" }}
+                    >
+                      Workflow
+                    </p>
+                  </button> */}
+
                   <button
                     type="button"
                     className="flex justify-center items-center group relative overflow-hidden rounded-xl border p-3 text-left transition-transform duration-200 hover:-translate-y-[1px]"
@@ -4607,9 +5468,13 @@ export function ResultsPage({
                       borderColor: "rgba(106, 214, 194, 0.45)",
                       background:
                         "linear-gradient(150deg, rgba(106, 214, 194, 0.24) 0%, rgba(106, 214, 194, 0.08) 45%, rgba(8, 15, 17, 0.6) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
                     }}
                     onClick={handleExportAnalysisCsv}
-                    disabled={!selectedMission?.flowData?.length}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
                   >
                     <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.teal }}>
                       .csv
@@ -4629,8 +5494,13 @@ export function ResultsPage({
                       borderColor: "rgba(86, 142, 255, 0.45)",
                       background:
                         "linear-gradient(150deg, rgba(86, 142, 255, 0.25) 0%, rgba(86, 142, 255, 0.08) 45%, rgba(8, 13, 26, 0.58) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
                     }}
                     onClick={handleExportGeoJSON}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
                   >
                     <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.blue }}>
                       .geojson
@@ -4650,10 +5520,15 @@ export function ResultsPage({
                       borderColor: "rgba(253, 148, 86, 0.45)",
                       background:
                         "linear-gradient(150deg, rgba(253, 148, 86, 0.28) 0%, rgba(253, 148, 86, 0.08) 50%, rgba(10, 14, 20, 0.55) 100%)",
+                      opacity:
+                        !selectedMission?.flowData?.length || isReportExporting
+                          ? 0.6
+                          : 1,
                     }}
                     onClick={() => {
                       void handleExportKMZ();
                     }}
+                    disabled={!selectedMission?.flowData?.length || isReportExporting}
                   >
                     <div className="absolute top-0 right-0 rounded-bl-lg px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: color.orange }}>
                       .kmz
@@ -4670,7 +5545,16 @@ export function ResultsPage({
             )}
           </div>
         </div>
+        {/* <Distance 
+            traceDataset={{ type: "FeatureCollection", features: [] }}
+            tracePoints={activeTracePointsForMap}
+            lowerLimit={legendScale.lowerLimit}
+            upperLimit={legendScale.upperLimit}
+            selectedDroneId={selectedResultDroneId}
+           /> */}
+
         <div className="mt-2 h-full">
+
           {selectedSensorMode === SENSOR_MODE_AERIS ? (
             <AerisPanel
               flowData={selectedFlowData}

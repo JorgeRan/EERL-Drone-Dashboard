@@ -316,15 +316,15 @@ const buildTraceFlightPathFeatureCollection = (traceDataset) => {
   return {
     type: "FeatureCollection",
     features: coordinateSegments.map((segment, segmentIndex) => ({
-        type: "Feature",
-        geometry: {
-          type: "LineString",
-          coordinates: segment,
-        },
-        properties: {
-          id: `trace-flight-path-${segmentIndex}`,
-        },
-      })),
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: segment,
+      },
+      properties: {
+        id: `trace-flight-path-${segmentIndex}`,
+      },
+    })),
   };
 };
 
@@ -675,20 +675,20 @@ export function Map({
   const renderedTracePointCount = displayedTraceDataset?.features?.length || 0;
   const traceReductionPercent = rawTracePointCount
     ? Math.max(
-        0,
-        Math.round((1 - renderedTracePointCount / rawTracePointCount) * 100),
-      )
+      0,
+      Math.round((1 - renderedTracePointCount / rawTracePointCount) * 100),
+    )
     : 0;
   const flightPathDataset = useMemo(
     () =>
       resultsPageMode
         ? buildTraceFlightPathFeatureCollection(resolvedTraceDataset)
         : buildLiveFlightPathFeatureCollection(
-            droneTrackHistory,
-            selectedDroneId,
-            visibleDroneIdSet,
-            hasVisibilityFilter,
-          ),
+          droneTrackHistory,
+          selectedDroneId,
+          visibleDroneIdSet,
+          hasVisibilityFilter,
+        ),
     [
       droneTrackHistory,
       hasVisibilityFilter,
@@ -755,6 +755,7 @@ export function Map({
     onViewportChangeRef.current = onViewportChange;
   }, [onViewportChange]);
 
+  // Only updates the input text; the applied scale is committed via applyMethaneScale.
   const handleLimitChange = (limitType, rawValue) => {
     const nextValue = rawValue.replace(",", ".");
 
@@ -763,41 +764,21 @@ export function Map({
     } else {
       setLowerLimitInput(nextValue);
     }
-
-    const parsedValue = Number(nextValue);
-
-    if (!Number.isFinite(parsedValue)) {
-      return;
-    }
-
-    if (limitType === "upper" && parsedValue > lowerLimit) {
-      setUpperLimit(parsedValue);
-    }
-
-    if (limitType === "lower" && parsedValue < upperLimit) {
-      setLowerLimit(parsedValue);
-    }
   };
 
-  const commitLimit = (limitType) => {
-    if (limitType === "upper") {
-      const parsedValue = Number(upperLimitInput);
-      const safeValue = Number.isFinite(parsedValue)
-        ? Math.max(parsedValue, lowerLimit + minimumLegendSpan)
-        : upperLimit;
+  const applyMethaneScale = () => {
+    const parsedLower = Number(lowerLimitInput);
+    const safeLower = Number.isFinite(parsedLower) ? parsedLower : lowerLimit;
 
-      setUpperLimit(safeValue);
-      setUpperLimitInput(formatLegendValue(safeValue));
-      return;
-    }
+    const parsedUpper = Number(upperLimitInput);
+    const safeUpper = Number.isFinite(parsedUpper)
+      ? Math.max(parsedUpper, safeLower + minimumLegendSpan)
+      : Math.max(upperLimit, safeLower + minimumLegendSpan);
 
-    const parsedValue = Number(lowerLimitInput);
-    const safeValue = Number.isFinite(parsedValue)
-      ? Math.min(parsedValue, upperLimit - minimumLegendSpan)
-      : lowerLimit;
-
-    setLowerLimit(safeValue);
-    setLowerLimitInput(formatLegendValue(safeValue));
+    setLowerLimit(safeLower);
+    setUpperLimit(safeUpper);
+    setLowerLimitInput(formatLegendValue(safeLower));
+    setUpperLimitInput(formatLegendValue(safeUpper));
   };
 
   useEffect(() => {
@@ -822,9 +803,9 @@ export function Map({
       style: isOnlineMode
         ? "mapbox://styles/mapbox/satellite-streets-v12"
         : buildOfflineSatelliteStyle({
-            imageUrl: satelliteImage,
-            coordinates: offlineCoordinates,
-          }),
+          imageUrl: satelliteImage,
+          coordinates: offlineCoordinates,
+        }),
       center: [initialCenterLongitude, initialCenterLatitude],
       zoom: 18,
       pitch: 0,
@@ -841,6 +822,14 @@ export function Map({
     });
 
     map.addControl(new mapboxgl.NavigationControl(), "top-right");
+
+    // The dashboard section is hidden with display:none (not unmounted) while another
+    // view is active, so mapbox never sees a resize event when it becomes visible again.
+    // Watch the container directly and resync the canvas whenever its size actually changes.
+    const containerResizeObserver = new ResizeObserver(() => {
+      map.resize();
+    });
+    containerResizeObserver.observe(mapContainerRef.current);
 
     const emitViewport = () => {
       const bounds = map.getBounds();
@@ -939,11 +928,11 @@ export function Map({
               : 0
             : initialHeatmapOnlyModeRef.current
               ? 0.9 * safeTraceOpacity
-            : plumeViewEnabled
-              ? heatmapEnabled
-                ? 0.2 * safeTraceOpacity
-                : 0
-              : 0,
+              : plumeViewEnabled
+                ? heatmapEnabled
+                  ? 0.2 * safeTraceOpacity
+                  : 0
+                : 0,
         },
       });
 
@@ -975,9 +964,9 @@ export function Map({
             ? 0.18 * safeTraceOpacity
             : initialHeatmapOnlyModeRef.current
               ? 0
-            : plumeViewEnabled
-              ? 0.15 * safeTraceOpacity
-              : 0.88 * safeTraceOpacity,
+              : plumeViewEnabled
+                ? 0.15 * safeTraceOpacity
+                : 0.88 * safeTraceOpacity,
         },
       });
 
@@ -1007,9 +996,9 @@ export function Map({
             ? 0.95 * safeTraceOpacity
             : initialHeatmapOnlyModeRef.current
               ? 0
-            : plumeViewEnabled
-              ? 0.15 * safeTraceOpacity
-              : 0.8 * safeTraceOpacity,
+              : plumeViewEnabled
+                ? 0.15 * safeTraceOpacity
+                : 0.8 * safeTraceOpacity,
         },
       });
 
@@ -1037,13 +1026,13 @@ export function Map({
               : 0
             : initialHeatmapOnlyModeRef.current
               ? 0
-            : plumeViewEnabled
-              ? heatmapEnabled
-                ? 0.1 * safeTraceOpacity
-                : 0
-              : heatmapEnabled
-                ? 0.36 * safeTraceOpacity
-                : 0,
+              : plumeViewEnabled
+                ? heatmapEnabled
+                  ? 0.1 * safeTraceOpacity
+                  : 0
+                : heatmapEnabled
+                  ? 0.36 * safeTraceOpacity
+                  : 0,
         },
       });
 
@@ -1172,18 +1161,16 @@ export function Map({
                             <div style="min-width: 148px; color: #e5eef8;">
                                 <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: #9fb0c2;">Sample ${sampleIndex}</div>
                                 <div style="margin-top: 4px; font-size: 13px; font-weight: 700; color: #ffffff;">${displayMetricLabel || (isAerisTrace ? "CH4" : "Purway")} ${Number(methane ?? 0).toFixed(2)} ${displayMetricUnits || (isAerisTrace ? "ppm" : "ppm-m")}</div>
-                                ${
-                                  isAerisTrace
-                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
-                                    : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
-                                }
-                                ${
-                                  isAerisTrace
-                                    ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${Number(acetylene ?? 0).toFixed(2)} ppm</div>
+                                ${isAerisTrace
+                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
+                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${Number(ch4 ?? 0).toFixed(2)} ppm</div>`
+              }
+                                ${isAerisTrace
+                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${Number(acetylene ?? 0).toFixed(2)} ppm</div>
                                 <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Nitrous Oxide ${Number(nitrousOxide ?? 0).toFixed(2)} ppm</div>`
-                                    : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
+                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${Number(sniffer ?? 0).toFixed(2)} ppm</div>
                                   <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${Number(purway ?? 0).toFixed(2)} ppm-m</div>`
-                                }
+              }
                                 <div style="margin-top: 4px; font-size: 12px; color: #d2dce8;">Altitude ${Number(pointAltitude).toFixed(0)} m</div>
                                 <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">Flight mark ${timeLabel}</div>
                             </div>
@@ -1234,13 +1221,12 @@ export function Map({
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Battery ${battery ?? "-"}%</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Speed ${speed ?? "-"} m/s</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">CH4 ${methane ?? "-"} ppm</div>
-                            ${
-                              isAerisDrone
-                                ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${acetylene ?? "-"} ppm</div>
+                            ${isAerisDrone
+              ? `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Acetylene ${acetylene ?? "-"} ppm</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Nitrous Oxide ${nitrousOxide ?? "-"} ppm</div>`
-                                : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? "-"} ppm-m</div>
+              : `<div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Purway ${purway ?? "-"} ppm-m</div>
                             <div style="margin-top: 2px; font-size: 12px; color: #d2dce8;">Sniffer ${sniffer ?? "-"} ppm</div>`
-                            }
+            }
                             <div style="margin-top: 2px; font-size: 11px; color: #9fb0c2;">${ts ? new Date(ts).toLocaleString() : ""}</div>
                         </div>
                     `,
@@ -1296,6 +1282,7 @@ export function Map({
         cancelAnimationFrame(plumeTransitionFrameRef.current);
         plumeTransitionFrameRef.current = null;
       }
+      containerResizeObserver.disconnect();
       popupRef.current?.remove();
       popupRef.current = null;
       primaryMarkerRef.current?.remove();
@@ -1620,7 +1607,7 @@ export function Map({
 
     const startHeatmapOpacity = Number(
       currentMap.getPaintProperty("methane-trace-heatmap", "heatmap-opacity") ??
-        0,
+      0,
     );
     const startZeroOpacity = Number(
       currentMap.getPaintProperty(
@@ -1636,7 +1623,7 @@ export function Map({
     );
     const startHotspotOpacity = Number(
       currentMap.getPaintProperty("methane-trace-hotspots", "circle-opacity") ??
-        0.8,
+      0.8,
     );
     const startHotspotStrokeOpacity = Number(
       currentMap.getPaintProperty(
@@ -1646,7 +1633,7 @@ export function Map({
     );
     const startHaloOpacity = Number(
       currentMap.getPaintProperty("methane-trace-halo", "circle-opacity") ??
-        0.36,
+      0.36,
     );
 
     const targetHeatmapOpacity = resultsPageMode
@@ -1655,18 +1642,18 @@ export function Map({
         : 0
       : isHeatmapOnlyActive
         ? 0.9 * safeTraceOpacity
-      : plumeViewEnabled
-        ? heatmapEnabled
-          ? 0.2 * safeTraceOpacity
-          : 0
-        : 0;
+        : plumeViewEnabled
+          ? heatmapEnabled
+            ? 0.2 * safeTraceOpacity
+            : 0
+          : 0;
     const targetZeroOpacity = resultsPageMode
       ? 0.18 * safeTraceOpacity
       : isHeatmapOnlyActive
         ? 0
-      : plumeViewEnabled
-        ? 0.15 * safeTraceOpacity
-        : 0.88 * safeTraceOpacity;
+        : plumeViewEnabled
+          ? 0.15 * safeTraceOpacity
+          : 0.88 * safeTraceOpacity;
     const targetZeroStrokeOpacity = isHeatmapOnlyActive
       ? 0
       : 0.72 * safeTraceOpacity;
@@ -1674,9 +1661,9 @@ export function Map({
       ? 0.95 * safeTraceOpacity
       : isHeatmapOnlyActive
         ? 0
-      : plumeViewEnabled
-        ? 0.15 * safeTraceOpacity
-        : 0.8 * safeTraceOpacity;
+        : plumeViewEnabled
+          ? 0.15 * safeTraceOpacity
+          : 0.8 * safeTraceOpacity;
     const targetHotspotStrokeOpacity = isHeatmapOnlyActive
       ? 0
       : 0.9 * safeTraceOpacity;
@@ -1686,13 +1673,13 @@ export function Map({
         : 0
       : isHeatmapOnlyActive
         ? 0
-      : plumeViewEnabled
-        ? heatmapEnabled
-          ? 0.1 * safeTraceOpacity
-          : 0
-        : heatmapEnabled
-          ? 0.36 * safeTraceOpacity
-          : 0;
+        : plumeViewEnabled
+          ? heatmapEnabled
+            ? 0.1 * safeTraceOpacity
+            : 0
+          : heatmapEnabled
+            ? 0.36 * safeTraceOpacity
+            : 0;
     const startPlumeOpacity = Number(
       currentMap.getPaintProperty(
         "methane-plume-columns",
@@ -1717,7 +1704,7 @@ export function Map({
         "methane-trace-heatmap",
         "heatmap-opacity",
         startHeatmapOpacity +
-          (targetHeatmapOpacity - startHeatmapOpacity) * eased,
+        (targetHeatmapOpacity - startHeatmapOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-zero-points",
@@ -1728,19 +1715,19 @@ export function Map({
         "methane-trace-zero-points",
         "circle-stroke-opacity",
         startZeroStrokeOpacity +
-          (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
+        (targetZeroStrokeOpacity - startZeroStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-opacity",
         startHotspotOpacity +
-          (targetHotspotOpacity - startHotspotOpacity) * eased,
+        (targetHotspotOpacity - startHotspotOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-hotspots",
         "circle-stroke-opacity",
         startHotspotStrokeOpacity +
-          (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
+        (targetHotspotStrokeOpacity - startHotspotStrokeOpacity) * eased,
       );
       currentMap.setPaintProperty(
         "methane-trace-halo",
@@ -1756,7 +1743,7 @@ export function Map({
         "methane-plume-caps",
         "line-opacity",
         startPlumeCapsOpacity +
-          (targetPlumeCapsOpacity - startPlumeCapsOpacity) * eased,
+        (targetPlumeCapsOpacity - startPlumeCapsOpacity) * eased,
       );
 
       if (progress < 1) {
@@ -2052,11 +2039,10 @@ export function Map({
     >
       <div className="flex h-full w-full flex-col gap-3">
         <div
-          className={`grid grid-cols-1 gap-3 xl:items-start ${
-            resultsPageMode
-              ? "xl:grid-cols-1"
-              : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
-          }`}
+          className={`grid grid-cols-1 gap-3 xl:items-start ${resultsPageMode
+            ? "xl:grid-cols-1"
+            : "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
+            }`}
         >
           {!resultsPageMode ? (
             <div className="flex flex-col gap-3 rounded-lg px-3 py-2">
@@ -2643,6 +2629,7 @@ export function Map({
             </div>
           </div>
         </div>
+        {!resultsPageMode ? (
         <div className="flex flex-row justify-between items-center">
           <div
             className="my-1 flex flex-wrap gap-x-4 gap-y-2 text-sm"
@@ -2665,20 +2652,8 @@ export function Map({
             {isTelemetryConnected ? "Live telemetry" : "Waiting telemetry"} •{" "}
             {mapMode}
           </div>
-        </div>
-        {resultsPageMode ? (
-          <div
-            className="my-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs"
-            style={{ color: color.textMuted }}
-          >
-            <span>raw: {rawTracePointCount.toLocaleString()}</span>
-            <span>rendered: {renderedTracePointCount.toLocaleString()}</span>
-            <span>reduction: {traceReductionPercent}%</span>
-            <span>
-              last render: {Number.isFinite(lastTraceRenderMs) ? `${lastTraceRenderMs} ms` : "-"}
-            </span>
-          </div>
-        ) : null}
+        </div>) : null}
+        
         <div className="flex items-stretch gap-2">
           <div
             ref={mapContainerRef}
@@ -2686,7 +2661,7 @@ export function Map({
             style={resultsPageMode ? undefined : { borderColor: color.border }}
           />
 
-          <div className="flex h-full min-w-[100px] items-center gap-3">
+          <div className="flex flex-col h-full min-w-[100px] items-center justify-center gap-3">
             <div className="flex h-[292px] items-stretch gap-2">
               <div
                 className="w-5 rounded-[4px] border shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]"
@@ -2711,7 +2686,6 @@ export function Map({
                         onChange={(event) =>
                           handleLimitChange("upper", event.target.value)
                         }
-                        onBlur={() => commitLimit("upper")}
                         className="w-14 rounded-sm border bg-transparent px-1 py-0.5 text-[10px] font-semibold leading-none outline-none"
                         style={{ borderColor: color.border, color: color.text }}
                         aria-label="Upper methane scale limit"
@@ -2735,7 +2709,6 @@ export function Map({
                         onChange={(event) =>
                           handleLimitChange("lower", event.target.value)
                         }
-                        onBlur={() => commitLimit("lower")}
                         className="w-14 rounded-sm border bg-transparent px-1 py-0.5 text-[10px] font-semibold leading-none outline-none"
                         style={{ borderColor: color.border, color: color.text }}
                         aria-label="Lower methane scale limit"
@@ -2744,10 +2717,21 @@ export function Map({
                   </div>
                 ))}
               </div>
+
             </div>
+            <button
+            type="button"
+            onClick={applyMethaneScale}
+            className="inline-block align-middle rounded bg-orange-500 px-3 py-1 text-white text-xs hover:bg-orange-600">
+              Apply
+            </button>
           </div>
+
         </div>
+
       </div>
+
     </div>
+
   );
 }

@@ -434,15 +434,30 @@ if (GC_INTERVAL_MS > 0) {
 
 
 let serialPortHandleLive = null;
-let serialPortNameLive = "COM13";
-let serialBaudRateLive = 9600;
+let serialPortNameLive = (process.env.SERIAL_LIVE_PORT || "").trim();
+let serialBaudRateLive = Math.max(
+  1200,
+  Number(process.env.SERIAL_LIVE_BAUD_RATE || 9600),
+);
 
 function startSerialTelemetryLive(portName = serialPortNameLive, baudRate = serialBaudRateLive) {
+  if (!portName) {
+    return false;
+  }
+
   if (serialPortHandleLive) {
     try { serialPortHandleLive.close(); } catch { }
     serialPortHandleLive = null;
   }
-  serialPortHandleLive = new SerialPort({ path: portName, baudRate, autoOpen: true });
+
+  try {
+    serialPortHandleLive = new SerialPort({ path: portName, baudRate, autoOpen: false });
+  } catch (err) {
+    console.warn(`Serial live disabled: ${err?.message || err}`);
+    serialPortHandleLive = null;
+    return false;
+  }
+
   const parser = serialPortHandleLive.pipe(new ReadlineParser({ delimiter: "\n" }));
 
   parser.on("data", (line) => {
@@ -457,8 +472,21 @@ function startSerialTelemetryLive(portName = serialPortNameLive, baudRate = seri
   });
 
   serialPortHandleLive.on("error", (err) => {
-    console.error("Serial port error:", err);
+    console.warn("Serial port error:", err?.message || err);
   });
+
+  serialPortHandleLive.open((error) => {
+    if (error) {
+      console.warn(`Serial live disabled (${portName}): ${error.message}`);
+      try { serialPortHandleLive?.close(); } catch { }
+      serialPortHandleLive = null;
+      return;
+    }
+
+    console.log(`Serial live connected on ${portName} @ ${baudRate}`);
+  });
+
+  return true;
 }
 
 function parseAerisLine(line) {
@@ -513,8 +541,8 @@ app.post("/api/serial-port", (req, res) => {
   if (!port) return res.status(400).json({ error: "Missing port" });
   serialPortNameLive = port;
   if (baudRate) serialBaudRateLive = baudRate;
-  startSerialTelemetryLive(serialPortNameLive, serialBaudRateLive);
-  res.json({ ok: true, port: serialPortNameLive, baudRate: serialBaudRateLive });
+  const started = startSerialTelemetryLive(serialPortNameLive, serialBaudRateLive);
+  res.json({ ok: started, port: serialPortNameLive, baudRate: serialBaudRateLive });
 });
 
 if (serialPortNameLive) {
@@ -3466,6 +3494,10 @@ process.on("SIGTERM", () => {
 });
 
 startServer().catch((error) => {
-  console.error("Startup failed:", error.message);
+  if (error instanceof Error) {
+    console.error("Startup failed:", error.stack || error.message || error);
+  } else {
+    console.error("Startup failed:", error);
+  }
   process.exit(1);
 });

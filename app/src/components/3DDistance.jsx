@@ -1,0 +1,317 @@
+import React, { useEffect, useMemo, useRef } from 'react'
+import mapboxgl from 'mapbox-gl'
+import { tw, color } from '../constants/tailwind'
+import { buildMethaneColorExpression } from '../constants/methaneScale'
+import satelliteImage from '../assets/satellite.png'
+import { buildOfflineImageCoordinates, buildOfflineSatelliteStyle, shouldUseOnlineMap } from '../constants/offlineMap'
+import { traceOrigin } from '../data/methaneTraceData'
+import { buildDistancePlumeDatasetFromPoints } from '../shared/deckTraceData'
+
+const latitude = traceOrigin.latitude
+const longitude = traceOrigin.longitude
+const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN
+const DISTANCE_PLUME_HEIGHT_SCALE = 100
+
+export function Distance({ traceDataset, tracePoints, lowerLimit = 0, upperLimit = 200, selectedDroneId, focusCoordinates }) {
+    const mapContainerRef = useRef(null)
+    const mapRef = useRef(null)
+    const resolvedTracePoints = Array.isArray(tracePoints) && tracePoints.length > 0
+        ? tracePoints
+        : traceDataset.features.map((feature) => ({
+            sampleOrder: feature?.properties?.sampleOrder,
+            sampleIndex: feature?.properties?.sampleIndex,
+            timestampMs: feature?.properties?.timestampMs,
+            timestampIso: feature?.properties?.timestampIso,
+            timeLabel: feature?.properties?.timeLabel,
+            altitude: feature?.properties?.altitude,
+            methane: feature?.properties?.methane,
+            distance: feature?.properties?.distance,
+            sensorMode: feature?.properties?.sensorMode,
+            purway: feature?.properties?.purway,
+            sniffer: feature?.properties?.sniffer,
+            acetylene: feature?.properties?.acetylene,
+            nitrousOxide: feature?.properties?.nitrousOxide,
+            longitude: feature?.geometry?.coordinates?.[0],
+            latitude: feature?.geometry?.coordinates?.[1],
+            pointColor: feature?.properties?.pointColor,
+            payload: feature?.properties?.payload,
+        }))
+    const initialPlumeDatasetRef = useRef(buildDistancePlumeDatasetFromPoints(resolvedTracePoints))
+    const initialLowerLimitRef = useRef(lowerLimit)
+    const initialUpperLimitRef = useRef(upperLimit)
+    const distancePlumeDataset = useMemo(
+        () =>
+            buildDistancePlumeDatasetFromPoints(resolvedTracePoints).features.length
+                ? {
+                    type: 'FeatureCollection',
+                    features: buildDistancePlumeDatasetFromPoints(resolvedTracePoints).features.map((feature) => ({
+                        ...feature,
+                        properties: {
+                            ...feature.properties,
+                            plumeHeight: Number(feature?.properties?.plumeHeight ?? 0) * DISTANCE_PLUME_HEIGHT_SCALE,
+                        },
+                    })),
+                  }
+                : { type: 'FeatureCollection', features: [] },
+        [resolvedTracePoints],
+    )
+    const distancePositiveCount = useMemo(
+        () => resolvedTracePoints.filter((point) => Number(point?.distance ?? 0) > 0).length,
+        [resolvedTracePoints],
+    )
+    const distancePeakValue = useMemo(
+        () => Math.max(0, ...resolvedTracePoints.map((point) => Number(point?.distance ?? 0))),
+        [resolvedTracePoints],
+    )
+    const traceMetricMeta = useMemo(() => {
+        return {
+            label: 'distance samples extruded',
+            unit: 'm',
+        }
+    }, [])
+    const selectedFocusCoordinates = useMemo(() => {
+        const [liveLng, liveLat] = Array.isArray(focusCoordinates) ? focusCoordinates : []
+        if (Number.isFinite(liveLat) && Number.isFinite(liveLng)) {
+            return [liveLng, liveLat]
+        }
+
+        if (!Array.isArray(resolvedTracePoints) || resolvedTracePoints.length === 0) {
+            return [longitude, latitude]
+        }
+
+        const lastPoint = resolvedTracePoints[resolvedTracePoints.length - 1]
+        const lng = Number(lastPoint?.longitude)
+        const lat = Number(lastPoint?.latitude)
+
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            return [longitude, latitude]
+        }
+
+        return [lng, lat]
+    }, [focusCoordinates, resolvedTracePoints])
+
+    useEffect(() => {
+        if (!mapContainerRef.current || mapRef.current) {
+            return undefined
+        }
+
+        const isOnlineMode = shouldUseOnlineMap(mapboxToken)
+        const offlineCoordinates = buildOfflineImageCoordinates({
+            centerLat: latitude,
+            centerLon: longitude,
+        })
+
+        if (isOnlineMode) {
+            mapboxgl.accessToken = mapboxToken
+        }
+
+        const map = new mapboxgl.Map({
+            container: mapContainerRef.current,
+            style: isOnlineMode
+                ? 'mapbox://styles/mapbox/satellite-streets-v12'
+                : buildOfflineSatelliteStyle({
+                    imageUrl: satelliteImage,
+                    coordinates: offlineCoordinates,
+                }),
+            center: [longitude, latitude],
+            zoom: 17.2,
+            pitch: 72,
+            bearing: 34,
+            attributionControl: false,
+            antialias: true,
+        })
+
+        mapRef.current = map
+        map.addControl(new mapboxgl.NavigationControl(), 'top-right')
+
+        map.on('style.load', () => {
+            if (!isOnlineMode) {
+                map.fitBounds([offlineCoordinates[3], offlineCoordinates[1]], {
+                    duration: 0,
+                    padding: 24,
+                })
+            }
+
+            const initialLower = initialLowerLimitRef.current
+            const initialUpper = initialUpperLimitRef.current
+
+            if (isOnlineMode) {
+                map.addSource('mapbox-dem', {
+                    type: 'raster-dem',
+                    url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+                    tileSize: 512,
+                    maxzoom: 14,
+                })
+
+                map.setTerrain({ source: 'mapbox-dem', exaggeration: 1.35 })
+                map.setFog({
+                    color: 'rgba(255, 255, 255, 0.06)',
+                    'high-color': 'rgba(20, 31, 52, 0.14)',
+                    'space-color': '#0f172a',
+                    'horizon-blend': 0.08,
+                })
+
+                const labelLayerId = map
+                    .getStyle()
+                    ?.layers?.find((layer) => layer.type === 'symbol' && layer.layout?.['text-field'])?.id
+
+                map.addLayer(
+                    {
+                        id: 'mapbox-3d-buildings',
+                        source: 'composite',
+                        'source-layer': 'building',
+                        filter: ['==', ['get', 'extrude'], 'true'],
+                        type: 'fill-extrusion',
+                        minzoom: 15,
+                        paint: {
+                            'fill-extrusion-color': [
+                                'interpolate',
+                                ['linear'],
+                                ['get', 'height'],
+                                0,
+                                'rgba(148, 163, 184, 0.65)',
+                                40,
+                                'rgba(203, 213, 225, 0.78)',
+                                120,
+                                'rgba(255, 255, 255, 0.9)',
+                            ],
+                            'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+                            'fill-extrusion-height': ['coalesce', ['get', 'height'], 0],
+                            'fill-extrusion-opacity': 0.72,
+                            'fill-extrusion-vertical-gradient': true,
+                        },
+                    },
+                    labelLayerId,
+                )
+            }
+
+            map.addSource('distance-plume', {
+                type: 'geojson',
+                data: initialPlumeDatasetRef.current,
+            })
+
+            map.addLayer({
+                id: 'distance-plume-columns',
+                type: 'fill-extrusion',
+                source: 'distance-plume',
+                paint: {
+                    'fill-extrusion-color': buildMethaneColorExpression(initialLower, initialUpper, 'distance'),
+                    'fill-extrusion-base': ['get', 'baseHeight'],
+                    'fill-extrusion-height': ['get', 'plumeHeight'],
+                    'fill-extrusion-opacity': 0.82,
+                    'fill-extrusion-vertical-gradient': true,
+                },
+            })
+
+            map.addLayer({
+                id: 'distance-plume-caps',
+                type: 'line',
+                source: 'distance-plume',
+                paint: {
+                    'line-color': 'rgba(255,255,255,0.88)',
+                    'line-width': 1.1,
+                    'line-opacity': 0.45,
+                },
+            })
+        })
+
+        map.on('load', () => {
+            map.resize()
+        })
+
+        return () => {
+            map.remove()
+            mapRef.current = null
+        }
+    }, [])
+
+    useEffect(() => {
+        const currentMap = mapRef.current
+        const plumeSource = currentMap?.getSource('distance-plume')
+
+        if (plumeSource) {
+            plumeSource.setData(distancePlumeDataset)
+        }
+    }, [distancePlumeDataset])
+
+    useEffect(() => {
+        const currentMap = mapRef.current
+
+        if (!currentMap || !currentMap.getLayer('distance-plume-columns')) {
+            return
+        }
+
+        currentMap.setPaintProperty('distance-plume-columns', 'fill-extrusion-color', buildMethaneColorExpression(lowerLimit, upperLimit, 'distance'))
+    }, [lowerLimit, upperLimit])
+
+    useEffect(() => {
+        const currentMap = mapRef.current
+
+        if (!currentMap) {
+            return
+        }
+
+        currentMap.easeTo({
+            center: selectedFocusCoordinates,
+            duration: 900,
+            essential: true,
+        })
+    }, [selectedDroneId, selectedFocusCoordinates])
+
+    return (
+        <div className={tw.panel} style={{ backgroundColor: color.card, padding: '0.75rem' }}>
+            <div className='flex h-full w-full flex-col gap-3'>
+                <div className='flex items-start justify-between gap-3'>
+                    <div>
+                        <p className='text-xs uppercase tracking-[0.18em]' style={{ color: color.green }}>
+                            3D distance
+                        </p>
+                        <p className='text-xl font-bold tracking-tight' style={{ color: color.text }}>
+                            Terrain distance view
+                        </p>
+                    </div>
+                    <div
+                        className='rounded-full px-3 py-1 text-xs font-medium'
+                        style={{ backgroundColor: color.greenSoft, color: color.green }}
+                    >
+                        distance live
+                    </div>
+                </div>
+
+                {/* <div className='my-1 flex flex-wrap gap-x-4 gap-y-2 text-sm' style={{ color: color.textMuted }}>
+          <span>lat: {latitude.toFixed(4)}° N</span>
+          <span>lon: {Math.abs(longitude).toFixed(4)}° W</span>
+          <span>alt: {altitude} m</span>
+        </div> */}
+
+                <div className='grid gap-3 md:grid-cols-2'>
+                    <div className='rounded-lg border px-3 py-2.5' style={{ backgroundColor: color.surface, borderColor: color.border }}>
+                        <div className='text-[11px] uppercase tracking-[0.12em]' style={{ color: color.text }}>
+                            Distance columns
+                        </div>
+                        <div className='mt-1 flex items-baseline gap-2'>
+                            <span className='text-lg font-semibold' style={{ color: color.orange }}>{distancePositiveCount}</span>
+                            <span className='text-sm' style={{ color: color.textMuted }}>{traceMetricMeta.label}</span>
+                        </div>
+                    </div>
+
+                    <div className='rounded-lg border px-3 py-2.5' style={{ backgroundColor: color.surface, borderColor: color.border }}>
+                        <div className='text-[11px] uppercase tracking-[0.12em]' style={{ color: color.text }}>
+                            Peak distance value
+                        </div>
+                        <div className='mt-1 flex items-baseline gap-2'>
+                            <span className='text-lg font-semibold' style={{ color: color.green }}>{distancePeakValue.toFixed(2)}</span>
+                            <span className='text-sm' style={{ color: color.textMuted }}>{traceMetricMeta.unit}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div
+                    ref={mapContainerRef}
+                    className='h-500 w-full rounded-lg border'
+                    style={{ borderColor: color.border }}
+                />
+            </div>
+        </div>
+    )
+}

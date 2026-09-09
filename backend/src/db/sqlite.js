@@ -1,53 +1,65 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
-import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
+import postgres from 'postgres';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const runtimeDataRoot = (process.env.APP_DATA_DIR || '').trim();
-const dataDirectory = runtimeDataRoot
-  ? path.join(runtimeDataRoot, 'data')
-  : path.join(__dirname, '..', 'data');
-const databasePath = path.join(dataDirectory, 'telemetry_events.db');
-
-let dbPromise;
-
-const initializeDatabase = async () => {
-  if (!dbPromise) {
-    dbPromise = (async () => {
-      await fs.mkdir(dataDirectory, { recursive: true });
-
-      const db = await open({
-        filename: databasePath,
-        driver: sqlite3.Database,
-      });
-
-      await db.exec('PRAGMA journal_mode = WAL;');
-      await db.exec('PRAGMA foreign_keys = ON;');
-
-      return db;
-    })();
+const databaseUrl =
+  process.env.DATABASE_URL ||
+  process.env.SUPABASE_DATABASE_URL ||
+  'postgresql://postgres:postgres@localhost:5432/eerl_dashboard';
+const connectTimeoutSeconds = Math.max(
+  1,
+  Number(process.env.DB_CONNECT_TIMEOUT_SECONDS || 10),
+);
+const sslMode = (process.env.DB_SSL_MODE || 'prefer').toLowerCase();
+const resolveSslOption = () => {
+  if (sslMode === 'disable') {
+    return false;
   }
 
-  return dbPromise;
+  if (sslMode === 'require') {
+    return 'require';
+  }
+
+  return process.env.NODE_ENV === 'production' ? 'require' : false;
 };
 
-const convertPostgresPlaceholders = (queryText, params) => {
+let dbPromise;
+let lastInsertId = null;
+let lastAffectedRows = 0;
+
+const normalizeSqliteCreateTable = (queryText) =>
+  queryText
+    .replace(/\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b/gi, 'BIGSERIAL PRIMARY KEY')
+    .replace(/\bINTEGER\s+PRIMARY\s+KEY\b/gi, 'BIGINT PRIMARY KEY')
+    .replace(/\bREAL\b/gi, 'DOUBLE PRECISION')
+    .replace(/DEFAULT\s+CURRENT_TIMESTAMP\b/gi, 'DEFAULT (NOW()::text)');
+
+const convertQuestionMarkPlaceholders = (queryText, params) => {
+  let paramIndex = 0;
+  const convertedQuery = queryText.replace(/\?/g, () => {
+    paramIndex += 1;
+    return `$${paramIndex}`;
+  });
+
+  return {
+    query: convertedQuery,
+    values: params,
+  };
+};
+
+const reorderDollarPlaceholders = (queryText, params) => {
   const orderedIndexes = [];
   const convertedQuery = queryText.replace(/\$(\d+)/g, (_match, oneBasedIndex) => {
     orderedIndexes.push(Number(oneBasedIndex) - 1);
-    return '?';
+    return `$${orderedIndexes.length}`;
   });
 
   if (!orderedIndexes.length) {
     return { query: convertedQuery, values: params };
   }
 
-  const values = orderedIndexes.map((index) => params[index]);
-  return { query: convertedQuery, values };
+  return {
+    query: convertedQuery,
+    values: orderedIndexes.map((index) => params[index]),
+  };
 };
 
 const normalizeBoundValue = (value) => {
@@ -66,19 +78,133 @@ const normalizeBoundValue = (value) => {
   return value;
 };
 
-const isReadQuery = (queryText) => /^\s*(select|pragma|with)\b/i.test(queryText);
+const parseTableNameFromPragma = (queryText) => {
+  const match = queryText.match(/^\s*PRAGMA\s+table_info\(([^)]+)\)/i);
+  if (!match) {
+    return null;
+  }
+
+  return match[1].trim().replace(/^['"]|['"]$/g, '');
+};
+
+const convertInsertOrReplace = (queryText) => {
+  const match = queryText.match(
+    /^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+([^\s(]+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)\s*$/i,
+  );
+
+  if (!match) {
+    return queryText;
+  }
+
+  const tableName = match[1].trim();
+  const columns = match[2].split(',').map((column) => column.trim());
+  const values = match[3].trim();
+  const conflictColumn = columns[0];
+  const updateColumns = columns.slice(1);
+
+  const updateAssignments = updateColumns
+    .map((column) => `${column} = EXCLUDED.${column}`)
+    .join(', ');
+
+  return `
+    INSERT INTO ${tableName} (${columns.join(', ')})
+    VALUES (${values})
+    ON CONFLICT (${conflictColumn}) DO UPDATE
+    SET ${updateAssignments}
+  `;
+};
+
+const ensureDatabase = async () => {
+  const db = postgres(databaseUrl, {
+    connect_timeout: connectTimeoutSeconds,
+    idle_timeout: 30,
+    max: 1,
+    prepare: false,
+    ssl: resolveSslOption(),
+  });
+
+  try {
+    await db`SELECT 1`;
+  } catch (error) {
+    const hint =
+      "PostgreSQL connection failed. Verify DATABASE_URL/SUPABASE_DATABASE_URL and ensure the DB server is running and reachable.";
+    throw new Error(`${hint} Original error: ${error?.message || error}`);
+  }
+
+  try {
+    await db.unsafe('CREATE EXTENSION IF NOT EXISTS postgis');
+  } catch (error) {
+    console.warn(`PostGIS extension check skipped: ${error.message}`);
+  }
+  return db;
+};
+
+const initializeDatabase = async () => {
+  if (!dbPromise) {
+    dbPromise = ensureDatabase();
+  }
+
+  return dbPromise;
+};
 
 const execute = async (queryText, params = []) => {
   const db = await initializeDatabase();
-  const { query, values } = convertPostgresPlaceholders(queryText, params);
-  const normalizedValues = values.map(normalizeBoundValue);
+  const pragmaTable = parseTableNameFromPragma(queryText);
 
-  if (isReadQuery(query)) {
-    return db.all(query, normalizedValues);
+  if (pragmaTable) {
+    const rows = await db.unsafe(
+      `
+        SELECT
+          column_name AS name,
+          data_type AS type
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = $1
+        ORDER BY ordinal_position
+      `,
+      [pragmaTable],
+    );
+    return rows;
   }
 
-  await db.run(query, normalizedValues);
-  return [];
+  if (/^\s*SELECT\s+last_insert_rowid\(\)\s+AS\s+id\s*;?\s*$/i.test(queryText)) {
+    return [{ id: lastInsertId }];
+  }
+
+  if (/^\s*SELECT\s+changes\(\)\s+AS\s+count\s*;?\s*$/i.test(queryText)) {
+    return [{ count: lastAffectedRows }];
+  }
+
+  if (/sqlite_sequence/i.test(queryText)) {
+    return [];
+  }
+
+  let normalizedQuery = convertInsertOrReplace(queryText);
+  normalizedQuery = normalizeSqliteCreateTable(normalizedQuery);
+
+  const usesQuestionMarks = normalizedQuery.includes('?');
+  const converted = usesQuestionMarks
+    ? convertQuestionMarkPlaceholders(normalizedQuery, params)
+    : reorderDollarPlaceholders(normalizedQuery, params);
+
+  let finalQuery = converted.query;
+  const finalValues = converted.values.map(normalizeBoundValue);
+
+  const insertMatch = finalQuery.match(/^\s*INSERT\s+INTO\s+([^\s(]+)/i);
+  const hasReturning = /\bRETURNING\b/i.test(finalQuery);
+  const isTelemetryInsert = insertMatch?.[1] === 'telemetry_events';
+  if (isTelemetryInsert && !hasReturning) {
+    finalQuery = `${finalQuery.trim()} RETURNING id`;
+  }
+
+  const result = await db.unsafe(finalQuery, finalValues);
+  lastAffectedRows = Number(result?.count || 0);
+
+  if (isTelemetryInsert) {
+    const insertedRow = Array.isArray(result) ? result[0] : null;
+    lastInsertId = insertedRow?.id ?? lastInsertId;
+  }
+
+  return result;
 };
 
 const buildTemplateQuery = (strings, values) => {
@@ -110,7 +236,7 @@ sql.end = async () => {
   }
 
   const db = await dbPromise;
-  await db.close();
+  await db.end({ timeout: 5 });
   dbPromise = undefined;
 };
 

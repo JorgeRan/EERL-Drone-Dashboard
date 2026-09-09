@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { color } from "../constants/tailwind";
+import { Play, Pause, Square} from "lucide-react";
 
 
 const formatDuration = (seconds) => {
@@ -44,7 +45,7 @@ export function MeasurementControls({
 
   return (
     <div
-      className="flex flex-row items-center rounded-lg border p-3  gap-4"
+      className="flex flex-row items-center rounded-lg border p-4 gap-4"
       style={{
         backgroundColor: color.card,
         borderColor: color.border,
@@ -96,7 +97,7 @@ export function MeasurementControls({
               type="button"
               onClick={status === "running" ? onPause : onResume}
               disabled={isBusy}
-              className="rounded-md border px-3 py-2 text-sm font-semibold transition-colors"
+              className="flex items-center justify-center rounded-md border px-4 py-3 text-sm font-semibold transition-colors"
               style={{
                 borderColor: color.borderStrong,
                 color: color.text,
@@ -104,21 +105,21 @@ export function MeasurementControls({
                 opacity: isBusy ? 0.65 : 1,
               }}
             >
-              {isBusy ? "Working..." : status === "running" ? "Pause" : "Resume"}
+              {isBusy ? "Working..." : status === "running" ? <Pause size={45} /> : <Play size={45} />}
             </button>
 
             <button
               type="button"
               onClick={onStop}
               disabled={isBusy}
-              className="rounded-md px-3 py-2 text-sm font-semibold transition-colors"
+              className="flex items-center justify-center rounded-md px-4 py-3 text-sm font-semibold transition-colors"
               style={{
                 backgroundColor: color.red,
                 color: "#1f2937",
                 opacity: isBusy ? 0.65 : 1,
               }}
             >
-              Stop
+              <Square size={22} />
             </button>
           </div>
         )}

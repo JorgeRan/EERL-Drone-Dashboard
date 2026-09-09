@@ -23,6 +23,12 @@ const calculateDistanceMeters = (latitudeA, longitudeA, latitudeB, longitudeB) =
 const filterStartupPointsByDrone = (points) => {
   const rows = Array.isArray(points) ? points : [];
 
+  const appendPoints = (target, source) => {
+    for (let index = 0; index < source.length; index += 1) {
+      target.push(source[index]);
+    }
+  };
+
   if (rows.length <= 1) {
     return rows;
   }
@@ -45,7 +51,7 @@ const filterStartupPointsByDrone = (points) => {
 
   groupedByDrone.forEach((dronePoints) => {
     if (dronePoints.length <= 1) {
-      filtered.push(...dronePoints);
+      appendPoints(filtered, dronePoints);
       return;
     }
 
@@ -54,7 +60,7 @@ const filterStartupPointsByDrone = (points) => {
     const startLongitude = Number(firstPoint?.longitude);
 
     if (!Number.isFinite(startLatitude) || !Number.isFinite(startLongitude)) {
-      filtered.push(...dronePoints);
+      appendPoints(filtered, dronePoints);
       return;
     }
 
@@ -102,7 +108,7 @@ const filterStartupPointsByDrone = (points) => {
       return;
     }
 
-    filtered.push(...keptPoints);
+    appendPoints(filtered, keptPoints);
   });
 
   return filtered;
@@ -196,6 +202,7 @@ export const buildDeckTracePointsFromFlowData = (datasetFlowData) => {
         purway: point.purway,
         acetylene: point.acetylene,
         nitrousOxide: point.nitrousOxide,
+        distance: point.distance ?? point.payload?.distance ?? null,
         sensorMode: point.sensorMode || extractTelemetryMetrics(point)?.sensorMode,
         ch4: point.methane,
         methane: traceValue,
@@ -216,15 +223,15 @@ export const buildDeckTracePointsFromFlowData = (datasetFlowData) => {
     });
 };
 
-export const buildMethanePlumeDatasetFromPoints = (tracePoints) => {
+const buildPlumeDatasetFromPoints = (tracePoints, valueKey, heightScale) => {
   const positivePoints = (Array.isArray(tracePoints) ? tracePoints : [])
-    .filter((point) => Number(point?.methane ?? 0) > 0)
+    .filter((point) => Number(point?.[valueKey] ?? 0) > 0)
     .sort((left, right) => {
-      const leftMethane = Number(left?.methane ?? 0);
-      const rightMethane = Number(right?.methane ?? 0);
+      const leftValue = Number(left?.[valueKey] ?? 0);
+      const rightValue = Number(right?.[valueKey] ?? 0);
 
-      if (leftMethane !== rightMethane) {
-        return leftMethane - rightMethane;
+      if (leftValue !== rightValue) {
+        return leftValue - rightValue;
       }
 
       return Number(left?.sampleOrder ?? 0) - Number(right?.sampleOrder ?? 0);
@@ -246,14 +253,14 @@ export const buildMethanePlumeDatasetFromPoints = (tracePoints) => {
     features: positivePoints.map((point, index) => {
       const sampleLon = Number(point?.longitude ?? point?.sourceLongitude ?? 0);
       const sampleLat = Number(point?.latitude ?? point?.sourceLatitude ?? 0);
-      const methane = Number(point?.methane ?? 0);
+      const value = Number(point?.[valueKey] ?? 0);
       const altitude = Number(point?.altitude ?? 0);
       const footprintRadiusMeters = 1;
       const latOffset = metersToLatitudeDegrees(footprintRadiusMeters);
       const lonOffset = metersToLongitudeDegrees(footprintRadiusMeters, sampleLat);
       const altitudeBand = altitude - minimumAltitude;
       const baseHeight = 0;
-      const plumeHeight = methane * 0.01;
+      const plumeHeight = value * heightScale;
 
       return {
         type: "Feature",
@@ -274,7 +281,7 @@ export const buildMethanePlumeDatasetFromPoints = (tracePoints) => {
           timestampMs: point?.timestampMs,
           timestampIso: point?.timestampIso,
           timeLabel: point?.timeLabel,
-          methane,
+          [valueKey]: value,
           altitude,
           passBand: Math.floor(altitudeBand / 6) + 1,
           pointColor: point?.pointColor,
@@ -285,3 +292,9 @@ export const buildMethanePlumeDatasetFromPoints = (tracePoints) => {
     }),
   };
 };
+
+export const buildMethanePlumeDatasetFromPoints = (tracePoints) =>
+  buildPlumeDatasetFromPoints(tracePoints, "methane", 0.01);
+
+export const buildDistancePlumeDatasetFromPoints = (tracePoints) =>
+  buildPlumeDatasetFromPoints(tracePoints, "distance", 0.01);

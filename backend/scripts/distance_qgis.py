@@ -9,431 +9,856 @@
 ***************************************************************************
 """
 
-from __future__ import annotations
-
-import csv
-import math
-from pathlib import Path
 from typing import Any, Optional
+import math
+import shutil
+import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.parse import unquote, urlencode
 
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtGui import QImage, QPainter
+from qgis import processing
 from qgis.core import (
-	Qgis,
-	QgsCoordinateReferenceSystem,
-	QgsFeature,
-	QgsField,
-	QgsFields,
-	QgsGeometry,
-	QgsProcessing,
-	QgsProcessingAlgorithm,
-	QgsProcessingContext,
-	QgsProcessingException,
-	QgsProcessingFeedback,
-	QgsProcessingLayerPostProcessorInterface,
-	QgsProcessingParameterBoolean,
-	QgsProcessingParameterCrs,
-	QgsProcessingParameterFeatureSink,
-	QgsProcessingParameterFile,
-	QgsProcessingParameterNumber,
-	QgsProcessingParameterString,
-	QgsWkbTypes,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsMapRendererCustomPainterJob,
+    QgsMapSettings,
+    QgsProject,
+    QgsRasterLayer,
+    QgsProcessingAlgorithm,
+    QgsProcessingContext,
+    QgsProcessingException,
+    QgsProcessingFeedback,
+    QgsProcessingLayerPostProcessorInterface,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterCrs,
+    QgsProcessingParameterFile,
+    QgsProcessingParameterFileDestination,
+    QgsProcessingParameterNumber,
+    QgsProcessingParameterRasterDestination,
+    QgsProcessingParameterString,
+    QgsProcessingUtils,
+    QgsVectorLayer,
 )
 
 
-class AutoOpen3DPostProcessor(QgsProcessingLayerPostProcessorInterface):
-	def __init__(self, should_open: bool):
-		super().__init__()
-		self.should_open = should_open
+def _apply_renderer_stretch(layer, feedback, label: str = "Style"):
+    provider = layer.dataProvider()
+    renderer = layer.renderer()
+    if renderer is None:
+        return
 
-	def _apply_3d_renderer(self, layer, feedback):
-		try:
-			import qgis._3d as q3d  # type: ignore
-		except Exception:
-			feedback.pushWarning("3D API module is unavailable; cannot auto-configure 3D renderer.")
-			return
+    set_min = getattr(renderer, "setClassificationMin", None)
+    set_max = getattr(renderer, "setClassificationMax", None)
+    if not callable(set_min) or not callable(set_max):
+        return
 
-		renderer_cls = getattr(q3d, "QgsVectorLayer3DRenderer", None)
-		symbol_cls = getattr(q3d, "QgsPolygon3DSymbol", None)
-		if renderer_cls is None or symbol_cls is None:
-			feedback.pushWarning("3D renderer classes are unavailable in this QGIS build.")
-			return
+    stretch_min = None
+    stretch_max = None
 
-		if not hasattr(layer, "setRenderer3D"):
-			feedback.pushWarning("Layer does not support setRenderer3D in this runtime.")
-			return
+    cumulative_cut = getattr(provider, "cumulativeCut", None)
+    if callable(cumulative_cut):
+        try:
+            stretch_min, stretch_max = cumulative_cut(1, 0.02, 0.98, layer.extent(), 0)
+        except TypeError:
+            try:
+                stretch_min, stretch_max = cumulative_cut(1, 0.02, 0.98)
+            except Exception:
+                stretch_min, stretch_max = None, None
+        except Exception:
+            stretch_min, stretch_max = None, None
 
-		try:
-			symbol = symbol_cls()
+    if not (
+        isinstance(stretch_min, (int, float))
+        and isinstance(stretch_max, (int, float))
+        and math.isfinite(float(stretch_min))
+        and math.isfinite(float(stretch_max))
+        and float(stretch_min) < float(stretch_max)
+    ):
+        stats = provider.bandStatistics(1)
+        stretch_min = float(stats.minimumValue)
+        stretch_max = float(stats.maximumValue)
+        source = "min/max"
+    else:
+        source = "2-98 percentile"
 
-			set_altitude_clamping = getattr(symbol, "setAltitudeClamping", None)
-			if callable(set_altitude_clamping):
-				clamp_mode = None
-				if hasattr(Qgis, "AltitudeClamping"):
-					clamp_mode = getattr(Qgis.AltitudeClamping, "Relative", None)
-				if clamp_mode is not None:
-					set_altitude_clamping(clamp_mode)
-
-			if hasattr(symbol, "setExtrusionHeightExpression"):
-				symbol.setExtrusionHeightExpression('"height"')
-			elif hasattr(symbol, "setExtrusionHeight"):
-				symbol.setExtrusionHeight(1.0)
-
-			if hasattr(symbol, "setHeightExpression"):
-				symbol.setHeightExpression('"base_z"')
-
-			renderer = renderer_cls(symbol)
-			layer.setRenderer3D(renderer)
-			layer.triggerRepaint()
-			feedback.pushInfo("Configured layer 3D renderer: extruded polygons using field 'height'.")
-		except Exception as exc:
-			feedback.pushWarning(f"Could not configure 3D renderer automatically: {exc}")
-
-	def postProcessLayer(self, layer, context, feedback):
-		if layer is not None:
-			self._apply_3d_renderer(layer, feedback)
-
-		if not self.should_open:
-			return
-
-		try:
-			from qgis.utils import iface  # type: ignore
-		except Exception:
-			feedback.pushWarning("QGIS GUI interface is unavailable; could not auto-open 3D map view.")
-			return
-
-		if iface is None:
-			feedback.pushWarning("QGIS interface is unavailable; could not auto-open 3D map view.")
-			return
-
-		opened = False
-
-		for method_name in ("createNewMapCanvas3D", "open3DMapView", "new3DMapCanvas"):
-			method = getattr(iface, method_name, None)
-			if callable(method):
-				try:
-					method()
-					opened = True
-					break
-				except Exception:
-					continue
-
-		if not opened:
-			for action_name in ("actionNew3DMapCanvas", "actionNew3DMapView"):
-				action_getter = getattr(iface, action_name, None)
-				if callable(action_getter):
-					try:
-						action = action_getter()
-						if action is not None:
-							action.trigger()
-							opened = True
-							break
-					except Exception:
-						continue
-
-		if opened:
-			feedback.pushInfo("Opened 3D map view automatically. Set extrusion to field 'height' for cylinder columns.")
-		else:
-			feedback.pushWarning("Could not find a compatible API to auto-open 3D map view in this QGIS build.")
+    if math.isfinite(float(stretch_min)) and math.isfinite(float(stretch_max)) and float(stretch_min) < float(stretch_max):
+        set_min(float(stretch_min))
+        set_max(float(stretch_max))
+        feedback.pushInfo(
+            f"{label} range set from {source}: min={float(stretch_min)}, max={float(stretch_max)}"
+        )
 
 
-class TargetDistanceColumnsAlgorithm(QgsProcessingAlgorithm):
-	_post_processor = None
+class HeatmapStylePostProcessor(QgsProcessingLayerPostProcessorInterface):
+    def __init__(self, style_path: str):
+        super().__init__()
+        self.style_path = style_path
 
-	INPUT_CSV = "INPUT_CSV"
-	INPUT_CRS = "INPUT_CRS"
-	X_FIELD = "X_FIELD"
-	Y_FIELD = "Y_FIELD"
-	DISTANCE_FIELD = "DISTANCE_FIELD"
-	BASE_Z = "BASE_Z"
-	HEIGHT_SCALE = "HEIGHT_SCALE"
-	CYLINDER_RADIUS = "CYLINDER_RADIUS"
-	CIRCLE_SEGMENTS = "CIRCLE_SEGMENTS"
-	AUTO_OPEN_3D = "AUTO_OPEN_3D"
-	LOG_EVERY_N = "LOG_EVERY_N"
-	OUTPUT = "OUTPUT"
+    def postProcessLayer(self, layer, context, feedback):
+        if not self.style_path:
+            return
 
-	def name(self) -> str:
-		return "target_distance_columns_3d"
+        if not layer or not layer.isValid():
+            feedback.pushWarning("Cannot style heatmap because output layer is invalid.")
+            return
 
-	def displayName(self) -> str:
-		return "Target Distance Columns (3D)"
+        style_file = Path(self.style_path)
+        if not style_file.exists():
+            feedback.pushWarning(
+                f"QML style file not found, skipping style: {self.style_path}"
+            )
+            return
 
-	def group(self) -> str:
-		return "EERL Drone"
+        load_result = layer.loadNamedStyle(str(style_file))
+        if isinstance(load_result, tuple):
+            message = str(load_result[0]) if len(load_result) > 0 else ""
+            ok = bool(load_result[1]) if len(load_result) > 1 else False
+        else:
+            ok = bool(load_result)
+            message = ""
 
-	def groupId(self) -> str:
-		return "eerl_drone"
+        if not ok:
+            feedback.pushWarning(
+                f"Failed to apply QML style: {message}"
+            )
+            return
 
-	def shortDescription(self) -> str:
-		return "Creates cylinder footprint polygons with height attributes for 3D columns."
+        try:
+            _apply_renderer_stretch(layer, feedback, label="Output style")
+        except Exception as exc:
+            feedback.pushWarning(f"Could not auto-adjust style range: {exc}")
 
-	def shortHelpString(self) -> str:
-		return (
-			"Builds cylinder footprint polygons from telemetry CSV rows. Each feature is centered "
-			"at target_longitude/target_latitude and contains base_z and height attributes, where "
-			"height = distance * height_scale. In 3D map view, set extrusion to field 'height' "
-			"to visualize vertical columns."
-		)
+        layer.triggerRepaint()
+        feedback.pushInfo(f"Applied QML style to heatmap: {self.style_path}")
 
-	def initAlgorithm(self, config: Optional[dict[str, Any]] = None):
-		self.addParameter(
-			QgsProcessingParameterFile(
-				self.INPUT_CSV,
-				"Telemetry CSV file",
-				extension="csv",
-			)
-		)
 
-		self.addParameter(
-			QgsProcessingParameterCrs(
-				self.INPUT_CRS,
-				"Coordinate reference system for target coordinates",
-				defaultValue="EPSG:4326",
-			)
-		)
+class MethaneHeatmapAlgorithm(QgsProcessingAlgorithm):
+    _style_post_processor = None
 
-		self.addParameter(
-			QgsProcessingParameterString(
-				self.X_FIELD,
-				"Longitude field",
-				defaultValue="target_longitude",
-			)
-		)
+    INPUT_CSV = "INPUT_CSV"
+    ORTHOPHOTO = "ORTHOPHOTO"
+    ANALYSIS_CRS = "ANALYSIS_CRS"
+    WEIGHT_FIELD = "WEIGHT_FIELD"
+    CONVERT_TO_PPM = "CONVERT_TO_PPM"
+    STYLE_QML = "STYLE_QML"
+    KMZ_OUTPUT = "KMZ_OUTPUT"
+    NORMALIZE_PERCENT = "NORMALIZE_PERCENT"
+    RADIUS = "RADIUS"
+    PIXEL_SIZE = "PIXEL_SIZE"
+    OUTPUT = "OUTPUT"
 
-		self.addParameter(
-			QgsProcessingParameterString(
-				self.Y_FIELD,
-				"Latitude field",
-				defaultValue="target_latitude",
-			)
-		)
+    def name(self) -> str:
+        return "methane_heatmap_from_telemetry"
 
-		self.addParameter(
-			QgsProcessingParameterString(
-				self.DISTANCE_FIELD,
-				"Distance/height field",
-				defaultValue="distance",
-			)
-		)
+    def displayName(self) -> str:
+        return "Methane Heatmap From Telemetry"
 
-		self.addParameter(
-			QgsProcessingParameterNumber(
-				self.BASE_Z,
-				"Base Z value",
-				type=QgsProcessingParameterNumber.Double,
-				defaultValue=0.0,
-			)
-		)
+    def group(self) -> str:
+        return "EERL Drone"
 
-		self.addParameter(
-			QgsProcessingParameterNumber(
-				self.HEIGHT_SCALE,
-				"Height scale multiplier",
-				type=QgsProcessingParameterNumber.Double,
-				defaultValue=1.0,
-				minValue=0.0,
-			)
-		)
+    def groupId(self) -> str:
+        return "eerl_drone"
 
-		self.addParameter(
-			QgsProcessingParameterNumber(
-				self.CYLINDER_RADIUS,
-				"Cylinder radius (meters)",
-				type=QgsProcessingParameterNumber.Double,
-				defaultValue=0.75,
-				minValue=0.01,
-			)
-		)
+    def shortDescription(self) -> str:
+        return "Validates telemetry columns and builds a methane heatmap raster."
 
-		self.addParameter(
-			QgsProcessingParameterNumber(
-				self.CIRCLE_SEGMENTS,
-				"Circle segments",
-				type=QgsProcessingParameterNumber.Integer,
-				defaultValue=12,
-				minValue=4,
-			)
-		)
+    def shortHelpString(self) -> str:
+        return (
+            "Input must be a telemetry CSV containing these fields: sample_index, "
+            "drone_id, sensor_mode, timestamp_iso, timestamp_ms, "
+            "time_local, latitude, longitude, altitude, target_latitude, "
+            "target_longitude, target_altitude, methane, sniffer, purway, acetylene, "
+            "nitrous_oxide, ethylene, distance, speed, wind_u, wind_v, wind_w, "
+            "methane_valid. All records are included; methane_valid values such as 0, "
+            "1, and 3 are accepted and not filtered out. Longitude and latitude are "
+            "used to build the point layer automatically. Heatmap radius and pixel size "
+            "are interpreted in analysis CRS units, so a projected CRS (meters) is "
+            "recommended. Optionally load an orthophoto raster into the map when "
+            "the algorithm runs. By default, output values remain raw relative "
+            "intensity. Enable normalization to convert output to 0-100 percent of "
+            "maximum intensity."
+        )
 
-		self.addParameter(
-			QgsProcessingParameterBoolean(
-				self.AUTO_OPEN_3D,
-				"Open 3D map view automatically",
-				defaultValue=True,
-			)
-		)
+    def initAlgorithm(self, config: Optional[dict[str, Any]] = None):
+        self.addParameter(
+            QgsProcessingParameterFile(
+                self.INPUT_CSV,
+                "Telemetry CSV file",
+                extension="csv",
+            )
+        )
 
-		self.addParameter(
-			QgsProcessingParameterNumber(
-				self.LOG_EVERY_N,
-				"Log distance/height every N rows (0 to disable)",
-				type=QgsProcessingParameterNumber.Integer,
-				defaultValue=1000,
-				minValue=0,
-			)
-		)
+        self.addParameter(
+            QgsProcessingParameterFile(
+                self.ORTHOPHOTO,
+                "Optional orthophoto (KMZ)",
+                optional=True,
+            )
+        )
 
-		self.addParameter(
-			QgsProcessingParameterFeatureSink(
-				self.OUTPUT,
-				"Output cylinder footprints (use height field for 3D extrusion)",
-				type=QgsProcessing.TypeVectorPolygon,
-			)
-		)
+        self.addParameter(
+            QgsProcessingParameterCrs(
+                self.ANALYSIS_CRS,
+                "Analysis CRS (use projected CRS for meter-based radius)",
+                defaultValue="EPSG:3857",
+            )
+        )
 
-	def processAlgorithm(
-		self,
-		parameters: dict[str, Any],
-		context: QgsProcessingContext,
-		feedback: QgsProcessingFeedback,
-	) -> dict[str, Any]:
-		csv_path = self.parameterAsFile(parameters, self.INPUT_CSV, context)
-		if not csv_path:
-			raise QgsProcessingException("Telemetry CSV file is required.")
+        self.addParameter(
+            QgsProcessingParameterString(
+                self.WEIGHT_FIELD,
+                "Weight field",
+                defaultValue="purway",
+            )
+        )
 
-		csv_file = Path(csv_path)
-		if not csv_file.exists():
-			raise QgsProcessingException(f"Telemetry CSV file not found: {csv_path}")
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.CONVERT_TO_PPM,
+                "Convert selected weight from ppm*m to ppm (divide by distance)",
+                defaultValue=True,
+            )
+        )
 
-		input_crs = self.parameterAsCrs(parameters, self.INPUT_CRS, context)
-		if not input_crs.isValid():
-			input_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        style_param = QgsProcessingParameterFile(
+            self.STYLE_QML,
+            "Optional QML style file",
+            extension="qml",
+            optional=True,
+        )
+        self.addParameter(style_param)
 
-		x_field = self.parameterAsString(parameters, self.X_FIELD, context).strip() or "target_longitude"
-		y_field = self.parameterAsString(parameters, self.Y_FIELD, context).strip() or "target_latitude"
-		distance_field = self.parameterAsString(parameters, self.DISTANCE_FIELD, context).strip() or "distance"
-		base_z = self.parameterAsDouble(parameters, self.BASE_Z, context)
-		height_scale = self.parameterAsDouble(parameters, self.HEIGHT_SCALE, context)
-		cylinder_radius_m = self.parameterAsDouble(parameters, self.CYLINDER_RADIUS, context)
-		circle_segments = int(self.parameterAsInt(parameters, self.CIRCLE_SEGMENTS, context))
-		auto_open_3d = self.parameterAsBool(parameters, self.AUTO_OPEN_3D, context)
-		log_every_n = int(self.parameterAsInt(parameters, self.LOG_EVERY_N, context))
+        self.addParameter(
+            QgsProcessingParameterFileDestination(
+                name=self.KMZ_OUTPUT,
+                description="Output combined KMZ",
+                fileFilter="KMZ files (*.kmz)",
+                optional=True,
+                createByDefault=False,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.NORMALIZE_PERCENT,
+                "Normalize output raster to 0-100 percent",
+                defaultValue=False,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.RADIUS,
+                "Heatmap radius (meters)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=20.0,
+                minValue=0.1,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.PIXEL_SIZE,
+                "Heatmap pixel size",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=0.50,
+                minValue=0.1,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                "Output methane heatmap",
+            )
+        )
+
+    def processAlgorithm(
+        self,
+        parameters: dict[str, Any],
+        context: QgsProcessingContext,
+        feedback: QgsProcessingFeedback,
+    ) -> dict[str, Any]:
+        csv_path = self.parameterAsFile(parameters, self.INPUT_CSV, context)
+        if not csv_path:
+            raise QgsProcessingException("Telemetry CSV file is required.")
+
+        csv_file = Path(csv_path)
+        if not csv_file.exists():
+            raise QgsProcessingException(f"Telemetry CSV file not found: {csv_path}")
+
+        delimiter = self._detect_delimiter(csv_file)
+        input_layer = self._load_csv_layer(csv_file, delimiter)
+        if input_layer is None or not input_layer.isValid():
+            feedback.pushInfo(
+                "Delimited text URI: " + self._build_csv_uri(csv_file, delimiter)
+            )
+            raise QgsProcessingException(
+                f"Failed to load telemetry CSV: {csv_path} (delimiter='{delimiter}')"
+            )
+        required_fields = {
+            "mission_name", 
+            "mission_id",
+            "sample_index",
+            "drone_id",
+            "sensor_mode",
+            "timestamp_iso",
+            "timestamp_ms",
+            "time_local",
+            "latitude",
+            "longitude",
+            "altitude",
+            "target_latitude",
+            "target_longitude",
+            "target_altitude",
+            "methane",
+            "sniffer",
+            "purway",
+            "acetylene",
+            "nitrous_oxide",
+            "ethylene",
+            "distance",
+            "speed",
+            "wind_u",
+            "wind_v",
+            "wind_w",
+            "methane_valid"
+        }
+
         
-		fields = QgsFields()
-		fields.append(QgsField("row_id", QVariant.Int))
-		fields.append(QgsField("x", QVariant.Double))
-		fields.append(QgsField("y", QVariant.Double))
-		fields.append(QgsField("distance", QVariant.Double))
-		fields.append(QgsField("base_z", QVariant.Double))
-		fields.append(QgsField("height", QVariant.Double))
-		fields.append(QgsField("radius_m", QVariant.Double))
+        layer_fields = {field.name() for field in input_layer.fields()}
+        missing = sorted(required_fields - layer_fields)
+        if missing:
+            raise QgsProcessingException(
+                "Input is missing required columns: " + ", ".join(missing)
+            )
 
-		sink, dest_id = self.parameterAsSink(
-			parameters,
-			self.OUTPUT,
-			context,
-			fields,
-			QgsWkbTypes.Polygon,
-			input_crs,
-		)
-		if sink is None:
-			raise QgsProcessingException("Could not create output sink for cylinder footprints.")
+        radius = self.parameterAsDouble(parameters, self.RADIUS, context)
+        pixel_size = self.parameterAsDouble(parameters, self.PIXEL_SIZE, context)
+        output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
+        weight_field = self.parameterAsString(parameters, self.WEIGHT_FIELD, context).strip()
+        style_qml = self.parameterAsFile(parameters, self.STYLE_QML, context)
+        orthophoto_path = self.parameterAsFile(parameters, self.ORTHOPHOTO, context)
+        kmz_output = self.parameterAsFileOutput(parameters, self.KMZ_OUTPUT, context)
+        if kmz_output:
+            kmz_path = Path(kmz_output)
+            if kmz_path.suffix in ("", "."):
+                kmz_output = str(kmz_path.with_suffix(".kmz"))
+        normalize_percent = self.parameterAsBool(parameters, self.NORMALIZE_PERCENT, context)
+        convert_to_ppm = self.parameterAsBool(parameters, self.CONVERT_TO_PPM, context)
+        if not weight_field:
+            weight_field = "purway"
 
-		delimiter = self._detect_delimiter(csv_file)
-		created = 0
-		skipped = 0
+        if orthophoto_path:
+            orthophoto_file = Path(orthophoto_path)
+            if not orthophoto_file.exists():
+                raise QgsProcessingException(
+                    f"Orthophoto file not found: {orthophoto_path}"
+                )
+            orthophoto_layer = self._load_orthophoto_layer(
+                orthophoto_file, context, feedback
+            )
+            if orthophoto_layer is None or not orthophoto_layer.isValid():
+                raise QgsProcessingException(
+                    f"Failed to load GroundOverlay KMZ: {orthophoto_path}"
+                )
 
-		with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
-			reader = csv.DictReader(handle, delimiter=delimiter)
-			if not reader.fieldnames:
-				raise QgsProcessingException("CSV appears to be empty or missing a header row.")
+            QgsProject.instance().addMapLayer(orthophoto_layer, True)
+            feedback.pushInfo(f"Orthophoto loaded: {orthophoto_path}")
 
-			headers = set(reader.fieldnames)
-			required = [x_field, y_field, distance_field]
-			missing = [name for name in required if name not in headers]
-			if missing:
-				raise QgsProcessingException(
-					"Input is missing required columns: " + ", ".join(missing)
-				)
+        analysis_crs = self.parameterAsCrs(parameters, self.ANALYSIS_CRS, context)
+        if not analysis_crs.isValid():
+            analysis_crs = QgsCoordinateReferenceSystem("EPSG:3857")
 
-			for row_id, row in enumerate(reader, start=1):
-				x = self._to_float(row.get(x_field))
-				y = self._to_float(row.get(y_field))
-				distance = self._to_float(row.get(distance_field))
+        if weight_field not in layer_fields:
+            raise QgsProcessingException(
+                f"Weight field '{weight_field}' was not found in input CSV."
+            )
 
-				if x is None or y is None:
-					skipped += 1
-					continue
+        heatmap_input = input_layer
+        
+        feedback.pushInfo(f"Weight field selected: {weight_field}")
+        
+        for i, feat in enumerate(heatmap_input.getFeatures()):
+            feedback.pushInfo(
+                f"Raw value: {feat[weight_field]}"
+                f"({type(feat[weight_field]).__name__})"
+            )
+            
+            if i >= 10:
+                break
+                
+        # feedback.pushInfo("=== Second Line ===")
+        # for i,feat in enumerate(input_layer.getFeatures()):
+        #     for i in range(0,23):
+        #         feedback.pushInfo(f"{feat[i]}")
+                
+        #     if i == 2:
+        #         break
+        
+        feedback.pushInfo("=== 3000 Values ===")
+        
+        for i, feat in enumerate(input_layer.getFeatures()):
+            feedback.pushInfo(
+                f"purway={feat['sniffer']} distance={feat['nitrous_oxide']}"
+            )
+            
+            if i == 2999:
+                break
+        
+        if heatmap_input.sourceCrs().isValid() and heatmap_input.sourceCrs() != analysis_crs:
+            feedback.pushInfo(
+                f"Reprojecting input layer from {heatmap_input.sourceCrs().authid()} to {analysis_crs.authid()} for heatmap analysis"
+            )
+            reproject_output = processing.run(
+                "native:reprojectlayer",
+                {
+                    "INPUT": heatmap_input,
+                    "TARGET_CRS": analysis_crs,
+                    "OUTPUT": "memory:",
+                },
+                context=context,
+                feedback=feedback,
+                is_child_algorithm=True,
+            )["OUTPUT"]
 
-				distance_value = max(0.0, distance if distance is not None else 0.0)
-				height = distance_value * height_scale
+            if hasattr(reproject_output, "featureCount"):
+                heatmap_input = reproject_output
+            else:
+                resolved_layer = QgsProcessingUtils.mapLayerFromString(
+                    str(reproject_output), context
+                )
+                if resolved_layer is None:
+                    raise QgsProcessingException(
+                        "Failed to resolve reprojected layer for heatmap input."
+                    )
+                heatmap_input = resolved_layer
 
-				radius_map_units = self._meters_to_map_units(cylinder_radius_m, y, input_crs)
-				if radius_map_units <= 0:
-					skipped += 1
-					continue
+        if convert_to_ppm:
+            feedback.pushInfo("Weight conversion mode: ppm (weight / distance)")
+            numeric_weight_expression = (
+                f"with_variable('w_raw', trim(coalesce(\"{weight_field}\", '')), "
+                "with_variable('w_norm', replace(@w_raw, ',', '.'), "
+                "with_variable('w_clean', regexp_replace(@w_norm, '[^0-9eE+.-]', ''), "
+                "with_variable('w_val', coalesce(try(to_real(@w_norm), NULL), try(to_real(@w_clean), NULL), 0), "
+                "with_variable('d_raw', trim(coalesce(\"distance\", '')), "
+                "with_variable('d_norm', replace(@d_raw, ',', '.'), "
+                "with_variable('d_clean', regexp_replace(@d_norm, '[^0-9eE+.-]', ''), "
+                "with_variable('d_val', coalesce(try(to_real(@d_norm), NULL), try(to_real(@d_clean), NULL), 0), "
+                "if(@d_val <= 0, 0, @w_val / @d_val)))))))))"
+            )
+        else:
+            feedback.pushInfo("Weight conversion mode: raw selected weight field (no distance division)")
+            numeric_weight_expression = (
+                f"with_variable('w_raw', trim(coalesce(\"{weight_field}\", '')), "
+                "with_variable('w_norm', replace(@w_raw, ',', '.'), "
+                "with_variable('w_clean', regexp_replace(@w_norm, '[^0-9eE+.-]', ''), "
+                "coalesce(try(to_real(@w_norm), NULL), try(to_real(@w_clean), NULL), 0))))"
+            )
+        weighted_output = processing.run(
+            "native:fieldcalculator",
+            {
+                "INPUT": heatmap_input,
+                "FIELD_NAME": "_w_num",
+                "FIELD_TYPE": 0,
+                "FIELD_LENGTH": 20,
+                "FIELD_PRECISION": 8,
+                "FORMULA": numeric_weight_expression,
+                "OUTPUT": "memory:",
+            },
+            context=context,
+            feedback=feedback,
+            is_child_algorithm=True,
+        )["OUTPUT"]
 
-				geom = QgsGeometry.fromWkt(f"POINT ({x} {y})").buffer(radius_map_units, circle_segments)
-				if geom is None or geom.isEmpty():
-					skipped += 1
-					continue
+        if hasattr(weighted_output, "featureCount"):
+            heatmap_input = weighted_output
+        else:
+            resolved_weighted_layer = QgsProcessingUtils.mapLayerFromString(
+                str(weighted_output), context
+            )
+            if resolved_weighted_layer is None:
+                raise QgsProcessingException(
+                    "Failed to resolve weighted input layer for heatmap."
+                )
+            heatmap_input = resolved_weighted_layer
 
-				feature = QgsFeature(fields)
-				feature.setGeometry(geom)
-				feature.setAttributes([row_id, x, y, distance_value, base_z, height, cylinder_radius_m])
-				sink.addFeature(feature)
-				created += 1
+        stats = processing.run(
+            "qgis:basicstatisticsforfields",
+            {
+                "INPUT_LAYER": heatmap_input,
+                "FIELD_NAME": "_w_num",
+                "OUTPUT_HTML_FILE": "TEMPORARY_OUTPUT",
+            },
+            context=context,
+            feedback=feedback,
+            is_child_algorithm=True,
+        )
+        feedback.pushInfo(
+            f"Weight stats (_w_num) -> min: {stats.get('MIN', 'n/a')}, max: {stats.get('MAX', 'n/a')}, mean: {stats.get('MEAN', 'n/a')}"
+        )
 
-				if log_every_n > 0 and row_id % log_every_n == 0:
-					feedback.pushInfo(
-						f"Row {row_id}: distance={distance_value}, height={height}, x={x}, y={y}"
-					)
-		feedback.pushInfo(
-			f"Created {created} cylinder footprints; skipped {skipped} invalid rows. "
-			"In 3D view, extrude by field 'height'."
-		)
+        valid_count = heatmap_input.featureCount()
+        if valid_count <= 0:
+            raise QgsProcessingException(
+                "No features available to build heatmap."
+            )
 
-		if context.willLoadLayerOnCompletion(dest_id):
-			self.__class__._post_processor = AutoOpen3DPostProcessor(auto_open_3d)
-			context.layerToLoadOnCompletionDetails(dest_id).setPostProcessor(
-				self.__class__._post_processor
-			)
+        feedback.pushInfo(f"Building heatmap from {valid_count} points")
+        raw_output_path = "TEMPORARY_OUTPUT" if normalize_percent else output_path
+        result = processing.run(
+            "qgis:heatmapkerneldensityestimation",
+            {
+                "INPUT": heatmap_input,
+                "WEIGHT_FIELD": "_w_num",
+                "RADIUS": radius,
+                "RADIUS_FIELD": "",
+                "PIXEL_SIZE": pixel_size,
+                "KERNEL": 0,
+                "DECAY": 0,
+                "OUTPUT_VALUE": 0,
+                "OUTPUT": raw_output_path,
+            },
+            context=context,
+            feedback=feedback,
+            is_child_algorithm=True,
+        )
 
-		return {self.OUTPUT: dest_id}
+        final_output = result["OUTPUT"]
+        if normalize_percent:
+            raw_heatmap_path = str(result["OUTPUT"])
+            raw_layer = QgsRasterLayer(raw_heatmap_path, "Raw Heatmap", "gdal")
+            if not raw_layer.isValid():
+                raise QgsProcessingException(
+                    "Failed to load raw heatmap for 0-100 normalization."
+                )
 
-	def createInstance(self):
-		return self.__class__()
+            max_value = raw_layer.dataProvider().bandStatistics(1).maximumValue
+            if not math.isfinite(max_value) or max_value <= 0:
+                raise QgsProcessingException(
+                    f"Cannot normalize heatmap: invalid maximum value ({max_value})."
+                )
 
-	def _detect_delimiter(self, csv_file: Path) -> str:
-		with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
-			header_line = handle.readline()
+            feedback.pushInfo(
+                f"Normalizing heatmap to 0-100 using max intensity {max_value}"
+            )
+            normalized_result = processing.run(
+                "qgis:rastercalculator",
+                {
+                    "EXPRESSION": f'("{raw_heatmap_path}@1" / {max_value}) * 100',
+                    "LAYERS": [raw_heatmap_path],
+                    "CELLSIZE": pixel_size,
+                    "EXTENT": None,
+                    "CRS": analysis_crs,
+                    "OUTPUT": output_path,
+                },
+                context=context,
+                feedback=feedback,
+                is_child_algorithm=True,
+            )
+            final_output = normalized_result["OUTPUT"]
+        else:
+            feedback.pushInfo(
+                "Using raw relative intensity output (not 0-100 normalized)."
+            )
 
-		if "\t" in header_line and header_line.count("\t") > header_line.count(","):
-			return "\t"
-		return ","
+        if kmz_output:
+            orthophoto_kmz_for_export = None
+            if orthophoto_path:
+                if Path(orthophoto_path).suffix.lower() == ".kmz":
+                    orthophoto_kmz_for_export = orthophoto_path
+                else:
+                    feedback.pushWarning(
+                        "ORTHOPHOTO is not a KMZ. Exporting KMZ with heatmap overlay only."
+                    )
 
-	def _to_float(self, value: Any) -> Optional[float]:
-		if value is None:
-			return None
+            self._export_combined_groundoverlay_kmz(
+                heatmap_path=str(final_output),
+                orthophoto_kmz_path=orthophoto_kmz_for_export,
+                style_qml=style_qml,
+                kmz_output=kmz_output,
+                feedback=feedback,
+            )
+        # feedback.pushInfo(f"Field type: {field.typeName()}")
+        # feedback.pushInfo(f"Feature count: {heatmap_input.featureCount()}")
+        
+        # for feat in heatmap_input.getFeatures():
+        #     feedback.pushInfo(
+        #         f"{feat[weight_field]} -> {feat['_w_num']}"
+        #     )
+        #     break
+        
+        if context.willLoadLayerOnCompletion(final_output):
+            details = context.layerToLoadOnCompletionDetails(final_output)
+            if style_qml:
+                self.__class__._style_post_processor = HeatmapStylePostProcessor(style_qml)
+                details.setPostProcessor(self.__class__._style_post_processor)
+                feedback.pushInfo(f"Style post-processor registered: {style_qml}")
+            else:
+                feedback.pushInfo("No QML style file provided; using default raster style.")
+        else:
+            feedback.pushWarning(
+                "Output layer is not set to load on completion, so the QML style will not be applied automatically."
+            )
+    
 
-		text = str(value).strip()
-		if text == "":
-			return None
+        return {self.OUTPUT: final_output}
 
-		text = text.replace(",", ".")
-		filtered = "".join(ch for ch in text if ch.isdigit() or ch in ".-+eE")
-		if filtered in ("", ".", "-", "+"):
-			return None
+    def _detect_delimiter(self, csv_file: Path) -> str:
+        with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+            header_line = handle.readline()
 
-		try:
-			return float(filtered)
-		except ValueError:
-			return None
+        if "\t" in header_line and header_line.count("\t") > header_line.count(","):
+            return "\t"
+        return ","
 
-	def _meters_to_map_units(
-		self,
-		meters: float,
-		latitude: float,
-		crs: QgsCoordinateReferenceSystem,
-	) -> float:
-		if meters <= 0:
-			return 0.0
+    def _load_csv_layer(self, csv_file: Path, delimiter: str) -> QgsVectorLayer:
+        uri = self._build_csv_uri(csv_file, delimiter)
+        return QgsVectorLayer(uri, "Telemetry CSV", "delimitedtext")
 
-		if not crs.isGeographic():
-			return meters
+    def _build_csv_uri(self, csv_file: Path, delimiter: str) -> str:
+        uri_params = {
+            "type": "csv",
+            "delimiter": delimiter,
+            "xField": "target_longitude",
+            "yField": "target_latitude",
+            "crs": "EPSG:4326",
+            "encoding": "UTF-8",
+            "detectTypes": "yes",
+            "useHeader": "yes",
+            "trimFields": "yes",
+            "skipEmptyFields": "yes",
+        }
+        query = unquote(urlencode(uri_params))
+        return f"{csv_file.resolve().as_uri()}?{query}"
 
-		# Approximate conversion at the feature latitude for geographic CRS.
-		lat_rad = math.radians(latitude)
-		meters_per_degree_lon = max(1e-9, 111320.0 * abs(math.cos(lat_rad)))
-		return meters / meters_per_degree_lon
+    def _load_orthophoto_layer(self, orthophoto_file: Path, context, feedback):
+        orthophoto_path = str(orthophoto_file)
+        zip_path = "/vsizip/" + orthophoto_path.replace("\\", "/")
 
+        candidates = [
+            orthophoto_path,
+            f"{zip_path}/doc.kml",
+        ]
+
+        for uri in candidates:
+            feedback.pushInfo(f"Trying GroundOverlay KMZ/KML: {uri}")
+
+            layer = QgsVectorLayer(uri, orthophoto_file.stem, "ogr")
+            if layer.isValid():
+                feedback.pushInfo(f"GroundOverlay loaded: {uri}")
+                return layer
+
+            feedback.pushWarning(f"GroundOverlay load failed: {layer.error().message()}")
+
+        return None
+
+    def _export_combined_groundoverlay_kmz(
+        self,
+        heatmap_path: str,
+        orthophoto_kmz_path: Optional[str],
+        style_qml: str,
+        kmz_output: str,
+        feedback,
+    ):
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            files_dir = tmp_path / "files"
+            files_dir.mkdir()
+
+            orthophoto_overlay = None
+            if orthophoto_kmz_path:
+                orthophoto_overlay = self._extract_first_groundoverlay(
+                    Path(orthophoto_kmz_path),
+                    files_dir,
+                    "orthophoto",
+                    feedback,
+                )
+
+            heatmap_png = files_dir / "heatmap.png"
+            heatmap_bounds = self._render_raster_to_groundoverlay_png(
+                heatmap_path,
+                style_qml,
+                heatmap_png,
+                wgs84,
+                feedback,
+            )
+
+            overlay_blocks = []
+            if orthophoto_overlay is not None:
+                overlay_blocks.append(
+                    f"""
+    <GroundOverlay>
+      <name>Orthophoto</name>
+      <Icon>
+        <href>{orthophoto_overlay['href']}</href>
+      </Icon>
+      <LatLonBox>
+        <north>{orthophoto_overlay['north']}</north>
+        <south>{orthophoto_overlay['south']}</south>
+        <east>{orthophoto_overlay['east']}</east>
+        <west>{orthophoto_overlay['west']}</west>
+      </LatLonBox>
+    </GroundOverlay>
+"""
+                )
+
+            overlay_blocks.append(
+                f"""
+    <GroundOverlay>
+      <name>Methane Heatmap</name>
+      <Icon>
+        <href>files/heatmap.png</href>
+      </Icon>
+      <LatLonBox>
+        <north>{heatmap_bounds['north']}</north>
+        <south>{heatmap_bounds['south']}</south>
+        <east>{heatmap_bounds['east']}</east>
+        <west>{heatmap_bounds['west']}</west>
+      </LatLonBox>
+    </GroundOverlay>
+"""
+            )
+
+            kml_text = (
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n"
+                "  <Document>\n"
+                "    <name>Methane Heatmap Export</name>\n"
+                f"{''.join(overlay_blocks)}"
+                "  </Document>\n"
+                "</kml>\n"
+            )
+
+            (tmp_path / "doc.kml").write_text(kml_text, encoding="utf-8")
+
+            with zipfile.ZipFile(kmz_output, "w", zipfile.ZIP_DEFLATED) as kmz:
+                kmz.write(tmp_path / "doc.kml", "doc.kml")
+                for file_path in files_dir.rglob("*"):
+                    if file_path.is_file():
+                        kmz.write(file_path, file_path.relative_to(tmp_path).as_posix())
+
+        feedback.pushInfo(f"Combined KMZ exported: {kmz_output}")
+
+    def _extract_first_groundoverlay(self, kmz_path: Path, files_dir: Path, prefix: str, feedback):
+        ns = {"kml": "http://www.opengis.net/kml/2.2"}
+
+        with zipfile.ZipFile(kmz_path, "r") as kmz:
+            kml_name = next(
+                (name for name in kmz.namelist() if name.lower().endswith(".kml")),
+                None,
+            )
+            if not kml_name:
+                raise QgsProcessingException("No KML file found inside orthophoto KMZ.")
+
+            root = ET.fromstring(kmz.read(kml_name))
+            overlay = root.find(".//kml:GroundOverlay", ns)
+            if overlay is None:
+                raise QgsProcessingException("No GroundOverlay found in orthophoto KMZ.")
+
+            href_node = overlay.find(".//kml:Icon/kml:href", ns)
+            box = overlay.find(".//kml:LatLonBox", ns)
+
+            if href_node is None or box is None:
+                raise QgsProcessingException("GroundOverlay is missing Icon href or LatLonBox.")
+
+            source_href = href_node.text.strip()
+            source_href_zip = str((Path(kml_name).parent / source_href).as_posix())
+
+            if source_href_zip not in kmz.namelist():
+                source_href_zip = source_href
+
+            image_ext = Path(source_href).suffix or ".png"
+            output_name = f"{prefix}{image_ext}"
+            output_path = files_dir / output_name
+
+            with kmz.open(source_href_zip) as src, output_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+        feedback.pushInfo(f"Extracted orthophoto GroundOverlay image: {output_name}")
+        return {
+            "href": f"files/{output_name}",
+            "north": box.findtext("kml:north", namespaces=ns),
+            "south": box.findtext("kml:south", namespaces=ns),
+            "east": box.findtext("kml:east", namespaces=ns),
+            "west": box.findtext("kml:west", namespaces=ns),
+        }
+
+    def _render_raster_to_groundoverlay_png(
+        self,
+        raster_path: str,
+        style_qml: str,
+        png_path: Path,
+        output_crs: QgsCoordinateReferenceSystem,
+        feedback,
+    ):
+        layer = QgsRasterLayer(raster_path, "Methane Heatmap", "gdal")
+        if not layer.isValid():
+            raise QgsProcessingException(f"Failed to load heatmap raster for KMZ: {raster_path}")
+
+        if style_qml:
+            layer.loadNamedStyle(style_qml)
+            try:
+                _apply_renderer_stretch(layer, feedback, label="KMZ render style")
+            except Exception as exc:
+                feedback.pushWarning(f"KMZ style range auto-adjust failed: {exc}")
+
+        transform = QgsCoordinateTransform(
+            layer.crs(),
+            output_crs,
+            QgsProject.instance(),
+        )
+        wgs84_extent = transform.transformBoundingBox(layer.extent())
+
+        # QGIS 4 / Qt6 may expose QImage formats under QImage.Format.*
+        image_format = getattr(QImage, "Format_ARGB32_Premultiplied", None)
+        if image_format is None and hasattr(QImage, "Format"):
+            image_format = getattr(QImage.Format, "Format_ARGB32_Premultiplied", None)
+        if image_format is None:
+            raise QgsProcessingException(
+                "Qt image format Format_ARGB32_Premultiplied is unavailable in this runtime."
+            )
+
+        transparent_color = getattr(Qt, "transparent", None)
+        if transparent_color is None and hasattr(Qt, "GlobalColor"):
+            transparent_color = getattr(Qt.GlobalColor, "transparent", None)
+        if transparent_color is None:
+            raise QgsProcessingException(
+                "Qt transparent color enum is unavailable in this runtime."
+            )
+
+        image = QImage(QSize(2048, 2048), image_format)
+        image.fill(transparent_color)
+
+        settings = QgsMapSettings()
+        settings.setLayers([layer])
+        settings.setDestinationCrs(output_crs)
+        settings.setExtent(wgs84_extent)
+        settings.setOutputSize(image.size())
+        settings.setBackgroundColor(transparent_color)
+
+        painter = QPainter(image)
+        job = QgsMapRendererCustomPainterJob(settings, painter)
+        job.start()
+        job.waitForFinished()
+        painter.end()
+
+        image.save(str(png_path), "PNG")
+
+        feedback.pushInfo(f"Rendered heatmap GroundOverlay PNG: {png_path}")
+
+        return {
+            "north": wgs84_extent.yMaximum(),
+            "south": wgs84_extent.yMinimum(),
+            "east": wgs84_extent.xMaximum(),
+            "west": wgs84_extent.xMinimum(),
+        }
+
+    def createInstance(self):
+        return self.__class__()
