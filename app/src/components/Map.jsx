@@ -223,6 +223,31 @@ const isAllDroneSelection = (selectedDroneId) => {
 
 const MAX_LINESTRING_VERTICES = 12000;
 const MAX_FLIGHT_PATH_RENDER_POINTS = 30000;
+// Caps how many trace points are ever handed to Mapbox as GeoJSON features,
+// independent of how many points are retained in React state for storage/analysis.
+const MAX_TRACE_RENDER_POINTS = 75000;
+
+const decimateFeaturesForRender = (features, maxPoints) => {
+  const items = Array.isArray(features) ? features : [];
+
+  if (items.length <= maxPoints) {
+    return items;
+  }
+
+  const step = Math.ceil(items.length / maxPoints);
+  const decimated = [];
+
+  for (let index = 0; index < items.length; index += step) {
+    decimated.push(items[index]);
+  }
+
+  const lastItem = items[items.length - 1];
+  if (decimated[decimated.length - 1] !== lastItem) {
+    decimated.push(lastItem);
+  }
+
+  return decimated;
+};
 
 const decimateCoordinatesForRender = (coordinates, maxPoints) => {
   const points = Array.isArray(coordinates) ? coordinates : [];
@@ -377,7 +402,8 @@ const buildDisplayedTraceDataset = (
   hasVisibilityFilter,
 ) => ({
   type: "FeatureCollection",
-  features: (traceDataset?.features || [])
+  features: decimateFeaturesForRender(
+    (traceDataset?.features || [])
     .filter((feature) =>
       isDroneVisible(
         feature?.properties?.droneId,
@@ -432,6 +458,8 @@ const buildDisplayedTraceDataset = (
       };
     })
     .filter(Boolean),
+    MAX_TRACE_RENDER_POINTS,
+  ),
 });
 
 const getTraceMaxMethane = (dataset) => {

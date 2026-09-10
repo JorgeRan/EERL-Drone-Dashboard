@@ -213,12 +213,14 @@ export const buildDeckTracePointsFromFlowData = (datasetFlowData) => {
         sourceLongitude,
         targetLatitude,
         targetLongitude,
-        mapCoordinates: point.payload?.map_coordinates === "target" ? "target" : "drone",
+        mapCoordinates:
+          (point.map_coordinates ?? point.payload?.map_coordinates) === "target"
+            ? "target"
+            : "drone",
         detected: traceValue > 0,
         pointColor: traceValue > 0 ? "#4ade80" : "#64748b",
         longitude: sourceLongitude,
         latitude: sourceLatitude,
-        payload: point.payload || {},
       };
     });
 };

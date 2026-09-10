@@ -211,6 +211,46 @@ const getTelemetryWindComponent = (payload, axis) => {
   return 0;
 };
 
+// Extracted so flow points don't need to retain the entire raw payload just for these.
+const getTelemetrySpeed = (source) =>
+  toFiniteNumber(source?.speed) ??
+  toFiniteNumber(source?.payload?.speed) ??
+  toFiniteNumber(source?.payload?.spd) ??
+  null;
+
+const getTelemetryTargetCoordinate = (source, axis) => {
+  const payload = source?.payload || {};
+
+  if (axis === "latitude") {
+    return (
+      toFiniteNumber(source?.target_latitude) ??
+      toFiniteNumber(source?.targetLatitude) ??
+      toFiniteNumber(payload.target_latitude) ??
+      toFiniteNumber(payload.target_position?.latitude) ??
+      null
+    );
+  }
+
+  if (axis === "longitude") {
+    return (
+      toFiniteNumber(source?.target_longitude) ??
+      toFiniteNumber(source?.targetLongitude) ??
+      toFiniteNumber(payload.target_longitude) ??
+      toFiniteNumber(payload.target_position?.longitude) ??
+      null
+    );
+  }
+
+  return (
+    toFiniteNumber(source?.target_altitude) ??
+    toFiniteNumber(payload.target_altitude) ??
+    null
+  );
+};
+
+const getTelemetryMapCoordinates = (source) =>
+  source?.map_coordinates ?? source?.payload?.map_coordinates ?? null;
+
 const buildFlowDataFromHistory = (historyRows) => {
   const sortedRows = [...historyRows].sort(
     (a, b) => new Date(a.ts || 0).getTime() - new Date(b.ts || 0).getTime(),
@@ -245,7 +285,11 @@ const buildFlowDataFromHistory = (historyRows) => {
       wind_w: getTelemetryWindComponent(payload, "z"),
       distance: row.distance ?? null,
       methane_valid: getTelemetryMethaneValidity({ ...row, payload }),
-      payload,
+      speed: getTelemetrySpeed(row),
+      target_latitude: getTelemetryTargetCoordinate(row, "latitude"),
+      target_longitude: getTelemetryTargetCoordinate(row, "longitude"),
+      target_altitude: getTelemetryTargetCoordinate(row, "altitude"),
+      map_coordinates: getTelemetryMapCoordinates(row),
     };
   });
 };
@@ -279,7 +323,11 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
     wind_w: getTelemetryWindComponent(payload, "z"),
     distance: telemetryRow.distance ?? null,
     methane_valid: getTelemetryMethaneValidity({ ...telemetryRow, payload }),
-    payload,
+    speed: getTelemetrySpeed(telemetryRow),
+    target_latitude: getTelemetryTargetCoordinate(telemetryRow, "latitude"),
+    target_longitude: getTelemetryTargetCoordinate(telemetryRow, "longitude"),
+    target_altitude: getTelemetryTargetCoordinate(telemetryRow, "altitude"),
+    map_coordinates: getTelemetryMapCoordinates(telemetryRow),
   };
 };
 
@@ -391,20 +439,20 @@ const appendFlowPoints = (series, telemetryRows, { maxPoints = null } = {}) => {
     sortedNewPoints[0].timestampMs >= Number(lastExistingPoint.timestampMs || 0);
 
   if (canFastAppend) {
+    // sampleOrder is a monotonic counter, not an array index, so trimming the
+    // oldest points never requires rewriting every remaining point below.
+    const nextSampleOrder = lastExistingPoint
+      ? Number(lastExistingPoint.sampleOrder || 0) + 1
+      : 0;
     const rebasedNewPoints = sortedNewPoints.map((point, index) => ({
       ...point,
-      sampleOrder: existingSeries.length + index,
-      sampleIndex: existingSeries.length + index + 1,
+      sampleOrder: nextSampleOrder + index,
+      sampleIndex: nextSampleOrder + index + 1,
     }));
     const appended = existingSeries.concat(rebasedNewPoints);
 
     if (maxPoints !== null && appended.length > maxPoints) {
-      const trimmed = appended.slice(appended.length - maxPoints);
-      return trimmed.map((point, index) => ({
-        ...point,
-        sampleOrder: index,
-        sampleIndex: index + 1,
-      }));
+      return appended.slice(appended.length - maxPoints);
     }
 
     return appended;
@@ -507,9 +555,12 @@ const MOVEMENT_THRESHOLD_METERS = 1.5;
 const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
 const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
 const TELEMETRY_FLUSH_INTERVAL_MS = 10000;
-const LIVE_TELEMETRY_RENDER_LIMIT = 100000;
-const MEASUREMENT_TRACE_STORAGE_LIMIT = 120000;
-const DASHBOARD_MAP_SOURCE_POINT_LIMIT = 100000;
+// Data retained for the live buffer and the current measurement.
+const LIVE_TELEMETRY_RENDER_LIMIT = 200000;
+const MEASUREMENT_TRACE_STORAGE_LIMIT = 200000;
+// Data made available to the dashboard map pipeline; Map.jsx separately caps
+// how many of these are actually turned into rendered GeoJSON features.
+const DASHBOARD_MAP_SOURCE_POINT_LIMIT = 200000;
 const DASHBOARD_START_POINT_FILTER_DEFAULT_RADIUS_METERS = 25;
 
 const toDashboardMapTracePoint = (point) => ({
