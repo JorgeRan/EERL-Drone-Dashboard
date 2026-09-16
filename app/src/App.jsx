@@ -1,4 +1,11 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Messages } from "primereact/messages";
 import "primereact/resources/themes/lara-light-indigo/theme.css";
 import "primereact/resources/primereact.min.css";
@@ -12,7 +19,7 @@ import { DataPage } from "./components/DataPage";
 import { ResultsPage } from "./components/ResultsPage";
 import { MeasurementControls } from "./components/MeasurementControls";
 import { MissionModal } from "./components/MissionModal";
-import {DeckMap} from "./components/DeckMap";
+import { DeckMap } from "./components/DeckMap";
 import { Map } from "./components/Map";
 import { buildDeckTracePointsFromFlowData } from "./shared/deckTraceData";
 import {
@@ -37,7 +44,10 @@ import {
   waitForBackendReady,
 } from "./services/api";
 import SignalStatus from "./components/SignalStatus";
-import { sampleSignalHistory, sampleSeqHistory } from "./components/signalStatusTestData";
+import {
+  sampleSignalHistory,
+  sampleSeqHistory,
+} from "./components/signalStatusTestData";
 import { Signal } from "lucide-react";
 import { COMPort } from "./components/COMPort";
 
@@ -436,7 +446,8 @@ const appendFlowPoints = (series, telemetryRows, { maxPoints = null } = {}) => {
   const lastExistingPoint = existingSeries[existingSeries.length - 1] || null;
   const canFastAppend =
     !lastExistingPoint ||
-    sortedNewPoints[0].timestampMs >= Number(lastExistingPoint.timestampMs || 0);
+    sortedNewPoints[0].timestampMs >=
+      Number(lastExistingPoint.timestampMs || 0);
 
   if (canFastAppend) {
     // sampleOrder is a monotonic counter, not an array index, so trimming the
@@ -460,9 +471,10 @@ const appendFlowPoints = (series, telemetryRows, { maxPoints = null } = {}) => {
 
   const merged = existingSeries.concat(sortedNewPoints);
   const sorted = merged.sort((a, b) => a.timestampMs - b.timestampMs);
-  const trimmed = maxPoints !== null && sorted.length > maxPoints
-    ? sorted.slice(sorted.length - maxPoints)
-    : sorted;
+  const trimmed =
+    maxPoints !== null && sorted.length > maxPoints
+      ? sorted.slice(sorted.length - maxPoints)
+      : sorted;
 
   return trimmed.map((point, index) => ({
     ...point,
@@ -485,7 +497,9 @@ const buildCombinedFlowDataForDrones = ({
       .filter(Boolean),
   );
 
-  const visibleDevices = devices.filter((device) => visibleIdSet.has(device.id));
+  const visibleDevices = devices.filter((device) =>
+    visibleIdSet.has(device.id),
+  );
   if (!visibleDevices.length) {
     return [];
   }
@@ -556,7 +570,7 @@ const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
 const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
 const TELEMETRY_FLUSH_INTERVAL_MS = 10000;
 // Data retained for the live buffer and the current measurement.
-const LIVE_TELEMETRY_RENDER_LIMIT = 200000;
+const LIVE_TELEMETRY_RENDER_LIMIT = 30000;
 const MEASUREMENT_TRACE_STORAGE_LIMIT = 200000;
 // Data made available to the dashboard map pipeline; Map.jsx separately caps
 // how many of these are actually turned into rendered GeoJSON features.
@@ -657,6 +671,8 @@ function App() {
   const deleteHoldRafRef = useRef(null);
 
   const [TELEMETRY_SOURCE, setTelemetrySource] = useState("MQTT");
+  const [isTelemetryIncoming, setIsTelemetryIncoming] = useState(false);
+  const telemetryInactiveTimerRef = useRef(null);
   const [showDashboardPlotData, setShowDashboardPlotData] = useState(true);
   const [methaneValidityVisibility, setMethaneValidityVisibility] = useState({
     valid: true,
@@ -730,7 +746,10 @@ function App() {
       };
     }
 
-    const safeStart = Math.max(0, Math.min(selectedWindow.startIndex ?? 0, dataLength - 2));
+    const safeStart = Math.max(
+      0,
+      Math.min(selectedWindow.startIndex ?? 0, dataLength - 2),
+    );
     const safeEnd = Math.max(
       safeStart + 1,
       Math.min(selectedWindow.endIndex ?? dataLength - 1, dataLength - 1),
@@ -762,12 +781,16 @@ function App() {
   const dashboardSelectedTimeRange = useMemo(() => {
     const windowStart = dashboardSelectedWindowFlowData[0] ?? null;
     const windowEnd =
-      dashboardSelectedWindowFlowData[dashboardSelectedWindowFlowData.length - 1] ??
-      null;
+      dashboardSelectedWindowFlowData[
+        dashboardSelectedWindowFlowData.length - 1
+      ] ?? null;
     const startTimestampMs = Number(windowStart?.timestampMs);
     const endTimestampMs = Number(windowEnd?.timestampMs);
 
-    if (!Number.isFinite(startTimestampMs) || !Number.isFinite(endTimestampMs)) {
+    if (
+      !Number.isFinite(startTimestampMs) ||
+      !Number.isFinite(endTimestampMs)
+    ) {
       return null;
     }
 
@@ -888,9 +911,13 @@ function App() {
 
           queuedEntries.forEach(([droneId, telemetryRows]) => {
             const currentSeries = previous[droneId] || [];
-            const updatedSeries = appendFlowPoints(currentSeries, telemetryRows, {
-              maxPoints: MEASUREMENT_TRACE_STORAGE_LIMIT,
-            });
+            const updatedSeries = appendFlowPoints(
+              currentSeries,
+              telemetryRows,
+              {
+                maxPoints: MEASUREMENT_TRACE_STORAGE_LIMIT,
+              },
+            );
 
             if (updatedSeries !== currentSeries) {
               next[droneId] = updatedSeries;
@@ -930,18 +957,35 @@ function App() {
           }
 
           const packets = Array.isArray(payload.packets) ? payload.packets : [];
-          if (packets.length === 0 || currentViewRef.current !== "dashboard") {
+          if (packets.length === 0) {
+            return;
+          }
+
+          setIsTelemetryIncoming(true);
+          if (telemetryInactiveTimerRef.current) {
+            window.clearTimeout(telemetryInactiveTimerRef.current);
+          }
+          telemetryInactiveTimerRef.current = window.setTimeout(() => {
+            setIsTelemetryIncoming(false);
+            telemetryInactiveTimerRef.current = null;
+          }, 3000);
+
+          if (currentViewRef.current !== "dashboard") {
             return;
           }
 
           packets.forEach((packet) => {
             const packetDataForSeries = packet?.telemetry;
 
-            if (!packetDataForSeries?.droneId && !packetDataForSeries?.drone_id) {
+            if (
+              !packetDataForSeries?.droneId &&
+              !packetDataForSeries?.drone_id
+            ) {
               return;
             }
 
-            const droneId = packetDataForSeries.drone_id || packetDataForSeries.droneId;
+            const droneId =
+              packetDataForSeries.drone_id || packetDataForSeries.droneId;
             const source =
               packet?.source === "UDP"
                 ? "UDP"
@@ -1038,6 +1082,11 @@ function App() {
         window.clearTimeout(flushTimer);
       }
 
+      if (telemetryInactiveTimerRef.current) {
+        window.clearTimeout(telemetryInactiveTimerRef.current);
+        telemetryInactiveTimerRef.current = null;
+      }
+
       flushQueuedTelemetry();
 
       if (telemetryWorker) {
@@ -1057,76 +1106,71 @@ function App() {
       .filter((device) => dashboardDroneVisibility[device.id] !== false)
       .map((device) => device.id);
   }, [dashboardDroneVisibility, showDashboardPlotData]);
-  const dashboardMapTracePointsImmediate = useMemo(
-    () => {
-      if (currentView !== "dashboard") {
-        return [];
-      }
+  const dashboardMapTracePointsImmediate = useMemo(() => {
+    if (currentView !== "dashboard") {
+      return [];
+    }
 
-      const combinedFlowData = buildCombinedFlowDataForDrones({
-        devices,
-        measurementTraceByDrone,
-        liveTelemetryByDrone,
-        recordedFlowDataByDrone,
-        visibleDroneIds: visibleDashboardDroneIds,
-        maxTotalPoints: DASHBOARD_MAP_SOURCE_POINT_LIMIT,
-      });
-      const methaneFilteredFlowData = combinedFlowData.filter((point) =>
-        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
-      );
-      const baseMapFlowData = methaneFilteredFlowData.length
-        ? methaneFilteredFlowData
-        : combinedFlowData;
-      const mapFlowData = baseMapFlowData.filter((point) => {
-        const selectionValue = getDashboardFlowSelectionValue(point);
-        if (
-          selectionValue === null ||
-          selectionValue < selectedWindowForDashboard.ppmMin ||
-          selectionValue > selectedWindowForDashboard.ppmMax
-        ) {
-          return false;
-        }
-
-        if (!dashboardSelectedTimeRange) {
-          return true;
-        }
-
-        const timestampMs = Number(point?.timestampMs);
-        return (
-          Number.isFinite(timestampMs) &&
-          timestampMs >= dashboardSelectedTimeRange.startTimestampMs &&
-          timestampMs <= dashboardSelectedTimeRange.endTimestampMs
-        );
-      });
-
-      return buildDeckTracePointsFromFlowData(
-        filterFlowPointsOutsideStartRadius(mapFlowData, {
-          enabled: startPointFilterEnabled,
-          startPoint: startPointCoordinates,
-          radiusMeters: startPointFilterRadiusMeters,
-        }),
-      ).map(toDashboardMapTracePoint);
-    },
-    [
-      currentView,
+    const combinedFlowData = buildCombinedFlowDataForDrones({
+      devices,
       measurementTraceByDrone,
       liveTelemetryByDrone,
       recordedFlowDataByDrone,
-      visibleDashboardDroneIds,
-      selectedWindowForDashboard,
-      dashboardSelectedTimeRange,
-      methaneValidityVisibility,
-      startPointCoordinates,
-      startPointFilterEnabled,
-      startPointFilterRadiusMeters,
-    ],
-  );
+      visibleDroneIds: visibleDashboardDroneIds,
+      maxTotalPoints: DASHBOARD_MAP_SOURCE_POINT_LIMIT,
+    });
+    const methaneFilteredFlowData = combinedFlowData.filter((point) =>
+      shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+    );
+    const baseMapFlowData = methaneFilteredFlowData.length
+      ? methaneFilteredFlowData
+      : combinedFlowData;
+    const mapFlowData = baseMapFlowData.filter((point) => {
+      const selectionValue = getDashboardFlowSelectionValue(point);
+      if (
+        selectionValue === null ||
+        selectionValue < selectedWindowForDashboard.ppmMin ||
+        selectionValue > selectedWindowForDashboard.ppmMax
+      ) {
+        return false;
+      }
+
+      if (!dashboardSelectedTimeRange) {
+        return true;
+      }
+
+      const timestampMs = Number(point?.timestampMs);
+      return (
+        Number.isFinite(timestampMs) &&
+        timestampMs >= dashboardSelectedTimeRange.startTimestampMs &&
+        timestampMs <= dashboardSelectedTimeRange.endTimestampMs
+      );
+    });
+
+    return buildDeckTracePointsFromFlowData(
+      filterFlowPointsOutsideStartRadius(mapFlowData, {
+        enabled: startPointFilterEnabled,
+        startPoint: startPointCoordinates,
+        radiusMeters: startPointFilterRadiusMeters,
+      }),
+    ).map(toDashboardMapTracePoint);
+  }, [
+    currentView,
+    measurementTraceByDrone,
+    liveTelemetryByDrone,
+    recordedFlowDataByDrone,
+    visibleDashboardDroneIds,
+    selectedWindowForDashboard,
+    dashboardSelectedTimeRange,
+    methaneValidityVisibility,
+    startPointCoordinates,
+    startPointFilterEnabled,
+    startPointFilterRadiusMeters,
+  ]);
 
   const dashboardMapTracePoints = useDeferredValue(
     dashboardMapTracePointsImmediate,
   );
-
-  
 
   const latestPointByDrone = useMemo(() => {
     const entries = {};
@@ -1381,7 +1425,8 @@ function App() {
         life: 3500,
         severity: "warn",
         summary: "Measurement Active",
-        detail: "Stop the current measurement before continuing another mission.",
+        detail:
+          "Stop the current measurement before continuing another mission.",
         closable: true,
       });
       return;
@@ -1475,15 +1520,15 @@ function App() {
 
     const missionPayload = continuingMission
       ? {
-        results: missionResults,
-      }
+          results: missionResults,
+        }
       : {
-        id: `mission-${Date.now()}`,
-        name: missionName.trim() || `Mission ${new Date().toLocaleString()}`,
-        createdAt: new Date().toISOString(),
-        elapsedSeconds: measurementElapsedSeconds,
-        results: missionResults,
-      };
+          id: `mission-${Date.now()}`,
+          name: missionName.trim() || `Mission ${new Date().toLocaleString()}`,
+          createdAt: new Date().toISOString(),
+          elapsedSeconds: measurementElapsedSeconds,
+          results: missionResults,
+        };
 
     const savedMission = continuingMission
       ? await updateMission(continuingMission.id, missionPayload)
@@ -1662,27 +1707,68 @@ function App() {
             Drone Monitor
           </span>
         </div>
-        <nav className="flex items-center gap-1">
-          {[
-            { id: "dashboard", label: "Dashboard" },
-            { id: "results", label: "Analysis" },
-            { id: "data", label: "Data" },
-          ].map((view) => (
-            <button
-              key={view.id}
-              type="button"
-              onClick={() => setCurrentView(view.id)}
-              className="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
-              style={{
-                backgroundColor:
-                  currentView === view.id ? color.orangeSoft : "transparent",
-                color: currentView === view.id ? color.orange : color.textMuted,
-              }}
-            >
-              {view.label}
-            </button>
-          ))}
-        </nav>
+        <div className="flex flex-row items-center gap-9">
+          <div
+            className="flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors"
+            style={{
+              backgroundColor: isTelemetryIncoming
+                ? color.greenSoft
+                : color.surface,
+              borderColor: isTelemetryIncoming ? color.green : color.border,
+              color: isTelemetryIncoming ? color.green : color.textMuted,
+            }}
+            role="status"
+            aria-live="polite"
+            title={
+              isTelemetryIncoming
+                ? `Receiving telemetry via ${TELEMETRY_SOURCE}`
+                : "No telemetry received recently"
+            }
+          >
+            <span className="relative flex h-2 w-2" aria-hidden="true">
+              {isTelemetryIncoming && (
+                <span
+                  className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-75"
+                  style={{ backgroundColor: color.green }}
+                />
+              )}
+              <span
+                className="relative inline-flex h-2 w-2 rounded-full"
+                style={{
+                  backgroundColor: isTelemetryIncoming
+                    ? color.green
+                    : color.offline,
+                }}
+              />
+            </span>
+            <span>
+              {isTelemetryIncoming ? "Telemetry incoming" : "Telemetry standby"}
+              {` · ${TELEMETRY_SOURCE}`}
+            </span>
+          </div>
+          <nav className="flex items-center gap-1">
+            {[
+              { id: "dashboard", label: "Dashboard" },
+              { id: "results", label: "Analysis" },
+              { id: "data", label: "Data" },
+            ].map((view) => (
+              <button
+                key={view.id}
+                type="button"
+                onClick={() => setCurrentView(view.id)}
+                className="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
+                style={{
+                  backgroundColor:
+                    currentView === view.id ? color.orangeSoft : "transparent",
+                  color:
+                    currentView === view.id ? color.orange : color.textMuted,
+                }}
+              >
+                {view.label}
+              </button>
+            ))}
+          </nav>
+        </div>
       </header>
 
       <main
@@ -1712,11 +1798,11 @@ function App() {
             onRefresh={reloadAllHistory}
           />
         ) : null}
-        <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
+        {/* <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
           <div className="pointer-events-auto rounded-xl bg-white/90 shadow-md backdrop-blur-sm">
             <Messages ref={msgs} />
           </div>
-        </div>
+         </div>  */}
 
         <section
           className={tw.shell}
@@ -1732,7 +1818,6 @@ function App() {
                   latestPointByDrone={latestPointByDrone}
                 />
               </div>
-              
             </div>
             <div className="grid w-full gap-3">
               <div className="flex flex-row gap-3">
@@ -1843,15 +1928,15 @@ function App() {
                       }
                       color={color}
                     /> */}
-                    
-                    {/* <SignalStatus
+
+                  {/* <SignalStatus
                       signalHistory={sampleSignalHistory}
                       seqHistory={sampleSeqHistory}
                       color={color}
                     /> 
                   </div> */}
                 </div>
-                
+
                 <MeasurementControls
                   status={measurementStatus}
                   elapsedSeconds={measurementElapsedSeconds}
@@ -1861,11 +1946,10 @@ function App() {
                   onResume={handleResumeMeasurement}
                   onStop={() => setIsMissionModalOpen(true)}
                 />
-
               </div>
 
               {/* <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]"> */}
-               <div className="grid w-full gap-3 ">
+              <div className="grid w-full gap-3 ">
                 <Map
                   traceDataset={EMPTY_FEATURE_COLLECTION}
                   tracePoints={dashboardMapTracePoints}
@@ -1892,7 +1976,9 @@ function App() {
                     setStartPointFilterEnabled((previous) => !previous)
                   }
                   startPointFilterRadiusMeters={startPointFilterRadiusMeters}
-                  onStartPointFilterRadiusChange={setStartPointFilterRadiusMeters}
+                  onStartPointFilterRadiusChange={
+                    setStartPointFilterRadiusMeters
+                  }
                   startPointPickModeEnabled={startPointPickModeEnabled}
                   onStartPointPickModeChange={setStartPointPickModeEnabled}
                   startPointCoordinates={startPointCoordinates}
@@ -1924,7 +2010,6 @@ function App() {
                   <WindPanel windSamples={windSamples} />
                 </div>
               )}
-              
             </div>
           </div>
         </section>

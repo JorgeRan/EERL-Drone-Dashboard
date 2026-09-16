@@ -22,6 +22,9 @@ dist-ssr
 .db
 .db-shm
 .db-wal
+backend/data/telemetry_events.db
+backend/data/telemetry_events.db-shm
+backend/data/telemetry_events.db-wal
 *.suo
 *.ntvs*
 *.njsproj

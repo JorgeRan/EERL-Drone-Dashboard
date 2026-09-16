@@ -17,6 +17,7 @@ import { OpacityAdjuster } from "./OpacitySlider";
 import {
   deleteAllData,
   deleteMission,
+  getMission,
   listMissions,
   listTelemetryHistory,
   listTelemetryHistoryAggregated,
@@ -1612,6 +1613,7 @@ export function ResultsPage({
   onDataRefresh,
 }) {
   const [selectedMissionId, setSelectedMissionId] = useState(null);
+  const [selectedMissionResults, setSelectedMissionResults] = useState(null);
   const [isMissionLoading, setIsMissionLoading] = useState(false);
   const [isMissionMapReady, setIsMissionMapReady] = useState(false);
   const [isMissionChartReady, setIsMissionChartReady] = useState(false);
@@ -1682,6 +1684,7 @@ export function ResultsPage({
   const replayTimerRef = useRef(null);
   const missionSelectionTimeoutRef = useRef(null);
   const missionRenderGuardTimeoutRef = useRef(null);
+  const missionRequestIdRef = useRef(0);
   const replayEndIndexRef = useRef(0);
   const analysisWorkerRef = useRef(null);
   const analysisRequestIdRef = useRef(0);
@@ -1758,11 +1761,21 @@ export function ResultsPage({
         setIsMissionChartReady(false);
       });
 
-      missionSelectionTimeoutRef.current = window.setTimeout(() => {
+      missionSelectionTimeoutRef.current = window.setTimeout(async () => {
+        const requestId = missionRequestIdRef.current + 1;
+        missionRequestIdRef.current = requestId;
         setSelectedResultDroneId(ALL_DRONES_OPTION);
         onSelectDevice?.(mission.primaryDroneId || selectedDeviceId);
         setSelectedMissionId(mission.id);
+        setSelectedMissionResults(null);
         missionSelectionTimeoutRef.current = null;
+
+        const loadedMission = await getMission(mission.id);
+        if (requestId !== missionRequestIdRef.current) {
+          return;
+        }
+
+        setSelectedMissionResults(loadedMission?.results || []);
 
         missionRenderGuardTimeoutRef.current = window.setTimeout(() => {
           setIsMissionLoading(false);
@@ -1782,10 +1795,13 @@ export function ResultsPage({
   const actualMissions = useMemo(() => {
     return missionsSample
       .map((mission) => {
-        const flowData = flattenMissionFlowData(mission.results);
-        const droneIds = (Array.isArray(mission.results) ? mission.results : [])
-          .map((entry) => entry?.drone)
-          .filter(Boolean);
+        const results =
+          mission.id === selectedMissionId ? selectedMissionResults : null;
+        const hasLoadedResults = Array.isArray(results);
+        const flowData = hasLoadedResults ? flattenMissionFlowData(results) : [];
+        const droneIds = hasLoadedResults
+          ? results.map((entry) => entry?.drone).filter(Boolean)
+          : mission.droneIds || [];
         const startTs = flowData[0]?.timestampIso || mission.createdAt || null;
         const endTs =
           flowData[flowData.length - 1]?.timestampIso ||
@@ -1806,7 +1822,9 @@ export function ResultsPage({
         return {
           id: mission.id,
           name: mission.name || "Untitled Mission",
-          sampleCount: flowData.length,
+          sampleCount: hasLoadedResults
+            ? flowData.length
+            : Number(mission.sampleCount || 0),
           droneIds,
           primaryDroneId: droneIds[0] || null,
           startTs,
@@ -1814,7 +1832,9 @@ export function ResultsPage({
           createdAt: mission.createdAt || null,
           elapsedSeconds: Number(mission.elapsedSeconds || 0),
           peakMethane,
-          status: flowData.length > 0 ? "Ready" : "No Data",
+          status: hasLoadedResults
+            ? flowData.length > 0 ? "Ready" : "No Data"
+            : Number(mission.sampleCount || 0) > 0 ? "Ready" : "No Data",
           droneSensorModeById,
           flowData,
         };
@@ -1824,7 +1844,7 @@ export function ResultsPage({
         const bTs = new Date(b.endTs || 0).getTime();
         return bTs - aTs;
       });
-  }, [missionsSample]);
+  }, [missionsSample, selectedMissionId, selectedMissionResults]);
 
   const telemetryHistoryFlowData = useMemo(
     () => normalizeTelemetryHistory(telemetryHistorySample),
@@ -1991,7 +2011,9 @@ export function ResultsPage({
   useEffect(() => {
     const loadData = async () => {
       setIsMissionsListLoading(true);
-      const [loadedMissions] = await Promise.all([listMissions()]);
+      const [loadedMissions] = await Promise.all([
+        listMissions({ includeResults: false }),
+      ]);
       setMissionsSample(loadedMissions);
       setIsMissionsListLoading(false);
       await loadTelemetryHistory({ from: "", to: "" });
@@ -2029,6 +2051,11 @@ export function ResultsPage({
       }
       mapViewportRequestIdRef.current += 1;
       mapViewportTileCacheRef.current.clear();
+      missionRequestIdRef.current += 1;
+      analysisInputRef.current = {
+        selectedFlowData: [],
+        selectedWindow: { startIndex: 0, endIndex: 0, ppmMin: 0, ppmMax: 1 },
+      };
     },
     [],
   );
@@ -5641,7 +5668,7 @@ export function ResultsPage({
           onClose={() => setCsvModalFile(null)}
           onComplete={async (msg, meta) => {
             setImportMessage(msg);
-            const missionList = await listMissions();
+            const missionList = await listMissions({ includeResults: false });
             setMissionsSample(missionList);
             await loadTelemetryHistory(telemetryHistoryRange);
             if (typeof onDataRefresh === "function") {

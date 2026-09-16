@@ -2609,8 +2609,9 @@ app.post("/api/missions", async (req, res) => {
   }
 });
 
-app.get("/api/missions", async (_req, res) => {
+app.get("/api/missions", async (req, res) => {
   try {
+    const includeResults = req.query.includeResults !== "false";
     const result = await sql.unsafe(
       `
             SELECT id, name, created_at AS createdAt, elapsed_seconds AS elapsedSeconds, results
@@ -2620,14 +2621,60 @@ app.get("/api/missions", async (_req, res) => {
     );
 
     res.json({
-      data: result.map((row) => ({
-        ...row,
-        results: parsePayload(row.results),
-      })),
+      data: result.map((row) => {
+        if (includeResults) {
+          return { ...row, results: parsePayload(row.results) };
+        }
+
+        const results = parsePayload(row.results);
+        const droneIds = (Array.isArray(results) ? results : [])
+          .map((entry) => entry?.drone)
+          .filter(Boolean);
+        const sampleCount = (Array.isArray(results) ? results : []).reduce(
+          (count, entry) =>
+            count + (Array.isArray(entry?.data) ? entry.data.length : 0),
+          0,
+        );
+
+        return {
+          id: row.id,
+          name: row.name,
+          createdAt: row.createdAt,
+          elapsedSeconds: row.elapsedSeconds,
+          droneIds,
+          sampleCount,
+        };
+      }),
     });
   } catch (error) {
     console.error("List missions endpoint error:", error.message);
     res.status(500).json({ error: "Failed to list missions" });
+  }
+});
+
+app.get("/api/missions/:id", async (req, res) => {
+  const missionId = typeof req.params.id === "string" ? req.params.id.trim() : "";
+
+  if (!missionId) {
+    return res.status(400).json({ error: "Mission id is required" });
+  }
+
+  try {
+    const result = await sql.unsafe(
+      `SELECT id, name, created_at AS createdAt, elapsed_seconds AS elapsedSeconds, results
+       FROM ${MISSIONS_TABLE} WHERE id = $1`,
+      [missionId],
+    );
+    const mission = result[0];
+
+    if (!mission) {
+      return res.status(404).json({ error: "Mission not found" });
+    }
+
+    return res.json({ ...mission, results: parsePayload(mission.results) });
+  } catch (error) {
+    console.error("Get mission endpoint error:", error.message);
+    return res.status(500).json({ error: "Failed to get mission" });
   }
 });
 

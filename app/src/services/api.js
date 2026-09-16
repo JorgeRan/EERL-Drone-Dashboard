@@ -163,9 +163,10 @@ export async function updateMission(missionId, mission) {
   }
 }
 
-export async function listMissions() {
+export async function listMissions({ includeResults = true } = {}) {
   try {
-    const response = await fetch(`${backendHttpUrl}/api/missions`, {
+    const query = includeResults ? "" : "?includeResults=false";
+    const response = await fetch(`${backendHttpUrl}/api/missions${query}`, {
       cache: "no-store",
     });
 
@@ -177,6 +178,23 @@ export async function listMissions() {
     return Array.isArray(payload?.data) ? payload.data : [];
   } catch {
     return [];
+  }
+}
+
+export async function getMission(missionId) {
+  if (!missionId) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `${backendHttpUrl}/api/missions/${encodeURIComponent(missionId)}`,
+      { cache: "no-store" },
+    );
+
+    return response.ok ? response.json() : null;
+  } catch {
+    return null;
   }
 }
 
