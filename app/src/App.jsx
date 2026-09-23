@@ -280,9 +280,15 @@ const buildFlowDataFromHistory = (historyRows) => {
       altitude: getTelemetryCoordinate(row, "altitude"),
       latitude: getTelemetryCoordinate(row, "latitude"),
       longitude: getTelemetryCoordinate(row, "longitude"),
-      wind_u: getTelemetryWindComponent(payload, "x"),
-      wind_v: getTelemetryWindComponent(payload, "y"),
-      wind_w: getTelemetryWindComponent(payload, "z"),
+      wind_u:
+        toFiniteNumber(row.wind_u) ??
+        getTelemetryWindComponent(payload, "x"),
+      wind_v:
+        toFiniteNumber(row.wind_v) ??
+        getTelemetryWindComponent(payload, "y"),
+      wind_w:
+        toFiniteNumber(row.wind_w) ??
+        getTelemetryWindComponent(payload, "z"),
       distance: row.distance ?? null,
       methane_valid: getTelemetryMethaneValidity({ ...row, payload }),
       speed: getTelemetrySpeed(row),
@@ -312,15 +318,21 @@ const buildFlowPointFromTelemetry = (telemetryRow, sampleOrder) => {
     sensorMode: metrics.sensorMode,
     sniffer: metrics.sniffer,
     purway: metrics.purway,
-    methane: metrics.methane,
+    methane: metrics.methane ?? metrics.purway ?? metrics.sniffer,
     acetylene: metrics.acetylene,
     nitrousOxide: metrics.nitrousOxide,
     altitude: getTelemetryCoordinate(telemetryRow, "altitude"),
     latitude: getTelemetryCoordinate(telemetryRow, "latitude"),
     longitude: getTelemetryCoordinate(telemetryRow, "longitude"),
-    wind_u: getTelemetryWindComponent(payload, "x"),
-    wind_v: getTelemetryWindComponent(payload, "y"),
-    wind_w: getTelemetryWindComponent(payload, "z"),
+    wind_u:
+      toFiniteNumber(telemetryRow.wind_u) ??
+      getTelemetryWindComponent(payload, "x"),
+    wind_v:
+      toFiniteNumber(telemetryRow.wind_v) ??
+      getTelemetryWindComponent(payload, "y"),
+    wind_w:
+      toFiniteNumber(telemetryRow.wind_w) ??
+      getTelemetryWindComponent(payload, "z"),
     distance: telemetryRow.distance ?? null,
     methane_valid: getTelemetryMethaneValidity({ ...telemetryRow, payload }),
     speed: getTelemetrySpeed(telemetryRow),
@@ -554,7 +566,7 @@ const HOLD_DELAY = 2000;
 const MOVEMENT_THRESHOLD_METERS = 1.5;
 const START_MISSION_PROMPT_COOLDOWN_MS = 45000;
 const START_MISSION_PROMPT_SNOOZE_AFTER_SAVE_MS = 120000;
-const TELEMETRY_FLUSH_INTERVAL_MS = 10000;
+const TELEMETRY_FLUSH_INTERVAL_MS = 1000;
 // Data retained for the live buffer and the current measurement.
 const LIVE_TELEMETRY_RENDER_LIMIT = 200000;
 const MEASUREMENT_TRACE_STORAGE_LIMIT = 200000;
@@ -751,31 +763,6 @@ function App() {
       ppmMax: safePpmMax,
     };
   }, [dashboardChartFlowData, selectedWindow]);
-  const dashboardSelectedWindowFlowData = useMemo(
-    () =>
-      dashboardChartFlowData.slice(
-        selectedWindowForDashboard.startIndex,
-        selectedWindowForDashboard.endIndex + 1,
-      ),
-    [dashboardChartFlowData, selectedWindowForDashboard],
-  );
-  const dashboardSelectedTimeRange = useMemo(() => {
-    const windowStart = dashboardSelectedWindowFlowData[0] ?? null;
-    const windowEnd =
-      dashboardSelectedWindowFlowData[dashboardSelectedWindowFlowData.length - 1] ??
-      null;
-    const startTimestampMs = Number(windowStart?.timestampMs);
-    const endTimestampMs = Number(windowEnd?.timestampMs);
-
-    if (!Number.isFinite(startTimestampMs) || !Number.isFinite(endTimestampMs)) {
-      return null;
-    }
-
-    return {
-      startTimestampMs: Math.min(startTimestampMs, endTimestampMs),
-      endTimestampMs: Math.max(startTimestampMs, endTimestampMs),
-    };
-  }, [dashboardSelectedWindowFlowData]);
   const windSamples = useMemo(
     () => dashboardChartFlowData,
     [dashboardChartFlowData],
@@ -1077,27 +1064,9 @@ function App() {
       const baseMapFlowData = methaneFilteredFlowData.length
         ? methaneFilteredFlowData
         : combinedFlowData;
-      const mapFlowData = baseMapFlowData.filter((point) => {
-        const selectionValue = getDashboardFlowSelectionValue(point);
-        if (
-          selectionValue === null ||
-          selectionValue < selectedWindowForDashboard.ppmMin ||
-          selectionValue > selectedWindowForDashboard.ppmMax
-        ) {
-          return false;
-        }
-
-        if (!dashboardSelectedTimeRange) {
-          return true;
-        }
-
-        const timestampMs = Number(point?.timestampMs);
-        return (
-          Number.isFinite(timestampMs) &&
-          timestampMs >= dashboardSelectedTimeRange.startTimestampMs &&
-          timestampMs <= dashboardSelectedTimeRange.endTimestampMs
-        );
-      });
+      const mapFlowData = baseMapFlowData.filter(
+        (point) => getDashboardFlowSelectionValue(point) !== null,
+      );
 
       return buildDeckTracePointsFromFlowData(
         filterFlowPointsOutsideStartRadius(mapFlowData, {
@@ -1114,7 +1083,6 @@ function App() {
       recordedFlowDataByDrone,
       visibleDashboardDroneIds,
       selectedWindowForDashboard,
-      dashboardSelectedTimeRange,
       methaneValidityVisibility,
       startPointCoordinates,
       startPointFilterEnabled,
@@ -1712,11 +1680,11 @@ function App() {
             onRefresh={reloadAllHistory}
           />
         ) : null}
-        <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
+        {/* <div className="pointer-events-none fixed top-3 left-1/2 z-50 w-full max-w-3xl -translate-x-1/2 px-3">
           <div className="pointer-events-auto rounded-xl bg-white/90 shadow-md backdrop-blur-sm">
             <Messages ref={msgs} />
           </div>
-        </div>
+        </div> */}
 
         <section
           className={tw.shell}

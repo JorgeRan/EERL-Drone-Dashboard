@@ -217,6 +217,8 @@ export const buildTelemetryEnvelope = (
       targetLongitude: normalized.targetLongitude,
       sensorMode: normalized.sensorMode,
       methane: normalized.methane,
+      sniffer: normalized.sniffer,
+      purway: normalized.purway,
       methane_valid: normalized.methane_valid,
       flight_status: normalized.flight_status,
       wind_u: normalized.wind_u,

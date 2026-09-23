@@ -1,10 +1,15 @@
 import mqtt from 'mqtt';
 
-const sourceBrokerUrl = process.env.SOURCE_BROKER_URL || 'mqtt://broker.hivemq.com:1884';
+const sourceBrokerUrl = process.env.SOURCE_BROKER_URL || 'mqtt://broker.hivemq.com:1883';
 const sourceTopic = process.env.SOURCE_TOPIC || 'DroneData';
 
 const targetBrokerUrl = process.env.TARGET_BROKER_URL || 'mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883';
-const targetTopic = process.env.TARGET_TOPIC || sourceTopic;
+const droneTopics = new Map([
+  ['M350', 'M350/data'],
+  ['M400-1', 'M400-1/data'],
+  ['M400-2', 'M400-2/data'],
+]);
+const targetTopics = [...droneTopics.values()];
 const targetUsername = process.env.TARGET_MQTT_USERNAME || 'EERL-MQTT';
 const targetPassword = process.env.TARGET_MQTT_PASSWORD || 'CH4Drone';
 const targetRetain = process.env.TARGET_RETAIN === 'true';
@@ -12,7 +17,8 @@ const verifyTarget = process.env.VERIFY_TARGET !== 'false';
 const targetUrl = new URL(targetBrokerUrl);
 
 const relayQueue = [];
-const maxQueueSize = Number(process.env.MAX_QUEUE_SIZE || 1000);
+// const maxQueueSize = Number(process.env.MAX_QUEUE_SIZE || 100);
+const maxQueueSize = 100;
 
 const sourceClient = mqtt.connect(sourceBrokerUrl, {
   clientId: `sim7600-source-${Math.random().toString(16).slice(2, 10)}`,
@@ -31,14 +37,14 @@ const targetClient = mqtt.connect(targetBrokerUrl, {
 });
 
 function publishToTarget(entry) {
-  targetClient.publish(targetTopic, entry.payload, { qos: 1, retain: targetRetain }, (error) => {
+  targetClient.publish(entry.targetTopic, entry.payload, { qos: 1, retain: targetRetain }, (error) => {
     if (error) {
       console.error('Target publish failed:', error.message);
       relayQueue.unshift(entry);
       return;
     }
 
-    console.log(`Relayed message to ${targetTopic} (${entry.payload.length} bytes)`);
+    console.log(`Relayed message to ${entry.targetTopic} (${entry.payload.length} bytes)`);
   });
 }
 
@@ -61,9 +67,27 @@ sourceClient.on('connect', () => {
 });
 
 sourceClient.on('message', (topic, payload) => {
+  let message;
+
+  try {
+    message = JSON.parse(payload.toString());
+  } catch {
+    console.warn(`Ignoring non-JSON source message on ${topic}`);
+    return;
+  }
+
+  const droneId = typeof message?.d === 'string' ? message.d.trim() : '';
+  const targetTopicForMessage = droneTopics.get(droneId);
+
+  if (!targetTopicForMessage) {
+    console.warn(`Ignoring telemetry with unsupported drone id: ${droneId || '<missing>'}`);
+    return;
+  }
+
   const entry = {
     topic,
     payload,
+    targetTopic: targetTopicForMessage,
     receivedAt: new Date().toISOString(),
   };
 
@@ -97,13 +121,13 @@ targetClient.on('connect', () => {
   console.log(`Target connected: ${targetBrokerUrl}`);
 
   if (verifyTarget) {
-    targetClient.subscribe(targetTopic, { qos: 1 }, (error) => {
+    targetClient.subscribe(targetTopics, { qos: 1 }, (error) => {
       if (error) {
-        console.error(`Target verification subscribe failed for ${targetTopic}:`, error.message);
+        console.error(`Target verification subscribe failed for ${targetTopics.join(', ')}:`, error.message);
         return;
       }
 
-      console.log(`Target verification subscribed: ${targetTopic}`);
+      console.log(`Target verification subscribed: ${targetTopics.join(', ')}`);
     });
   }
 

@@ -231,8 +231,8 @@ const runGarbageCollection = (reason = "manual") => {
 };
 
 const TELEMETRY_BINARY_MAGIC = 0x544c4d31; // TLM1
-const TELEMETRY_BINARY_VERSION = 1;
-const TELEMETRY_BINARY_ROW_BYTES = 42;
+const TELEMETRY_BINARY_VERSION = 2;
+const TELEMETRY_BINARY_ROW_BYTES = 54;
 const SOURCE_CODE_BY_NAME = {
   MQTT: 1,
   UDP: 2,
@@ -301,6 +301,12 @@ const encodeTelemetryBinaryBatch = (rows) => {
     rowBuffer.writeFloatLE(toNullableNumber(telemetry.purway) ?? Number.NaN, offset);
     offset += 4;
     rowBuffer.writeFloatLE(toNullableNumber(telemetry.distance) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.payload?.wind_u) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.payload?.wind_v) ?? Number.NaN, offset);
+    offset += 4;
+    rowBuffer.writeFloatLE(toNullableNumber(telemetry.payload?.wind_w) ?? Number.NaN, offset);
     offset += 4;
 
     rowBuffer.writeUInt8(droneIdBytes.length, offset);

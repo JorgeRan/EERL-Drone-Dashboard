@@ -90,6 +90,8 @@ function buildMinMaxDownsampledData(rawData, targetBucketCount) {
 function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }) {
   const hostRef = useRef(null);
   const plotRef = useRef(null);
+  const chartDataUpdaterRef = useRef(null);
+  const xAxisFormatterRef = useRef(null);
 
   const rawChartData = useMemo(() => {
     const length = flowData.length;
@@ -99,9 +101,20 @@ function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }
 
     for (let index = 0; index < length; index += 1) {
       const point = flowData[index] ?? {};
+      const methaneValue = Number(point.methane);
+      const purwayValue = Number(point.purway);
+      const snifferValue = Number(point.sniffer);
       xValues[index] = index;
-      purwayValues[index] = Number(point.purway) || 0;
-      snifferValues[index] = Number(point.sniffer) || 0;
+      purwayValues[index] = Number.isFinite(purwayValue)
+        ? purwayValue
+        : Number.isFinite(methaneValue)
+          ? methaneValue
+          : 0;
+      snifferValues[index] = Number.isFinite(snifferValue)
+        ? snifferValue
+        : Number.isFinite(methaneValue)
+          ? methaneValue
+          : 0;
     }
 
     return [xValues, purwayValues, snifferValues];
@@ -125,6 +138,9 @@ function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }
       });
   }, [flowData]);
 
+  chartDataUpdaterRef.current = getChartDataForWidth;
+  xAxisFormatterRef.current = xAxisFormatter;
+
   useEffect(() => {
     if (!hostRef.current) {
       return undefined;
@@ -134,7 +150,7 @@ function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }
 
     const mountPlot = () => {
       const width = Math.max(320, Math.floor(hostElement.clientWidth));
-      const chartData = getChartDataForWidth(width);
+      const chartData = chartDataUpdaterRef.current(width);
 
       const options = {
         width,
@@ -163,7 +179,7 @@ function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }
             scale: "x",
             stroke: color.textDim,
             grid: { stroke: color.borderStrong },
-            values: xAxisFormatter,
+            values: (...args) => xAxisFormatterRef.current(...args),
             size: 26,
             gap: 10,
           },
@@ -220,7 +236,7 @@ function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }
         return;
       }
       const width = Math.max(320, Math.floor(hostRef.current.clientWidth));
-      const chartData = getChartDataForWidth(width);
+      const chartData = chartDataUpdaterRef.current(width);
       plotRef.current.setData(chartData, false);
       plotRef.current.setSize({
         width,
@@ -236,7 +252,29 @@ function HighVolumeLineChart({ flowData, leftAxisPeakValue, rightAxisPeakValue }
         plotRef.current = null;
       }
     };
-  }, [getChartDataForWidth, leftAxisPeakValue, rightAxisPeakValue, xAxisFormatter]);
+  }, []);
+
+  useEffect(() => {
+    if (!plotRef.current || !hostRef.current) {
+      return;
+    }
+
+    const width = Math.max(320, Math.floor(hostRef.current.clientWidth));
+    plotRef.current.setData(chartDataUpdaterRef.current(width), false);
+   
+    plotRef.current.setScale("x", {
+      min: 0,
+      max: Math.max(1, flowData.length - 1),
+    });
+    plotRef.current.setScale("left", {
+      min: 0,
+      max: Math.max(1, leftAxisPeakValue),
+    });
+    plotRef.current.setScale("right", {
+      min: 0,
+      max: Math.max(1, rightAxisPeakValue),
+    });
+  }, [flowData, leftAxisPeakValue, rightAxisPeakValue]);
 
   return <div ref={hostRef} className="h-[360px] w-full min-w-0 overflow-hidden" />;
 }
@@ -305,11 +343,15 @@ export function FlowChart({ flowData, selection, onSelectionChange, resultsPageM
   const onSelectionChangeRef = useRef(onSelectionChange);
   const pendingSelectionRef = useRef(null);
   const dragFrameRef = useRef(0);
-  // Selection last committed to the parent (drives the map); dragging only updates local state until "Update View" is clicked.
   const [localSelection, setLocalSelection] = useState(selection);
   const [syncedSelection, setSyncedSelection] = useState(selection);
   const [isUpdating, setIsUpdating] = useState(false);
-  if (selection !== syncedSelection) {
+  const selectionChanged =
+    selection.startIndex !== syncedSelection.startIndex ||
+    selection.endIndex !== syncedSelection.endIndex ||
+    selection.ppmMin !== syncedSelection.ppmMin ||
+    selection.ppmMax !== syncedSelection.ppmMax;
+  if (selectionChanged) {
     setSyncedSelection(selection);
     setLocalSelection(selection);
     if (isUpdating) {

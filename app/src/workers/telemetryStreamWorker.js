@@ -1,8 +1,8 @@
 import { normalizeTelemetryPacket } from "../shared/telemetryContract";
 
 const TELEMETRY_BINARY_MAGIC = 0x544c4d31; // TLM1
-const TELEMETRY_BINARY_VERSION = 1;
-const TELEMETRY_BINARY_ROW_BYTES = 42;
+const TELEMETRY_BINARY_VERSION = 2;
+const TELEMETRY_BINARY_ROW_BYTES = 54;
 
 const SOURCE_NAME_BY_CODE = {
   1: "MQTT",
@@ -107,6 +107,15 @@ const decodeTelemetryBinaryBatch = (bufferLike) => {
     const distance = toNullableNumber(view.getFloat32(offset, true));
     offset += 4;
 
+    const windU = toNullableNumber(view.getFloat32(offset, true));
+    offset += 4;
+
+    const windV = toNullableNumber(view.getFloat32(offset, true));
+    offset += 4;
+
+    const windW = toNullableNumber(view.getFloat32(offset, true));
+    offset += 4;
+
     const droneIdLength = view.getUint8(offset);
     offset += 1;
 
@@ -133,6 +142,9 @@ const decodeTelemetryBinaryBatch = (bufferLike) => {
         sniffer,
         purway,
         distance,
+        wind_u: windU,
+        wind_v: windV,
+        wind_w: windW,
         methane_valid: methaneValid,
         flight_status: flightStatus,
       },

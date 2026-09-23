@@ -1,6 +1,6 @@
 {
   "name": "mqtt-drone-data-electron",
-  "version": "2.0.1",
+  "version": "2.1.2",
   "private": true,
   "author": "JorgeRan",
   "description": "Electron desktop app for drone telemetry and methane visualization",

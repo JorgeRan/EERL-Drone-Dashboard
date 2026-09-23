@@ -522,6 +522,15 @@ const buildAerisSnapshotPoint = (timestamp, sensorMode, state) => {
     methane: state.methane,
     acetylene: state.acetylene,
     nitrousOxide: state.nitrousOxide,
+    methane_valid: state.methane_valid,
+    methanePressureMbar: state.methanePressureMbar,
+    methanePowerInputMv: state.methanePowerInputMv,
+    nitrousOxidePressureMbar: state.nitrousOxidePressureMbar,
+    nitrousOxidePowerInputMv: state.nitrousOxidePowerInputMv,
+    acetylenePressureMbar: state.acetylenePressureMbar,
+    acetylenePowerInputMv: state.acetylenePowerInputMv,
+    nitrousOxideValid: state.nitrousOxideValid,
+    acetyleneValid: state.acetyleneValid,
     altitude: state.altitude,
     wind_u: state.wind_u,
     wind_v: state.wind_v,
@@ -541,13 +550,17 @@ const buildAerisSnapshotPoint = (timestamp, sensorMode, state) => {
 const hasAerisHeaders = (headers) => {
   const normalizedHeaders = headers.map(normalizeHeader);
   return (
-    normalizedHeaders.includes("utctime") &&
-    normalizedHeaders.some(
-      (header) =>
-        header.endsWith(".ch4") ||
-        header.endsWith(".c2h2_ppb") ||
-        header.endsWith(".n2o"),
-    )
+    (normalizedHeaders.includes("utctime") &&
+      normalizedHeaders.some(
+        (header) =>
+          header.endsWith(".ch4") ||
+          header.endsWith(".c2h2_ppb") ||
+          header.endsWith(".n2o"),
+      )) ||
+    (normalizedHeaders.includes("timestamp") &&
+      normalizedHeaders.includes("ch4_ppm") &&
+      normalizedHeaders.includes("c2h2_ppb") &&
+      normalizedHeaders.includes("n2o_ppm"))
   );
 };
 
@@ -559,24 +572,62 @@ const parseAerisCsvToMissionResults = (
   parseOptions,
 ) => {
   const delimiter = detectDelimiter(lines[0]);
-  const timeIdx = findHeaderIndex(headers, (header) => header === "utctime");
-  const methaneIdx = findHeaderIndex(headers, (header) => header.endsWith(".ch4"));
+  const normalizedHeaders = headers.map(normalizeHeader);
+  const isDirectAerisFormat = normalizedHeaders.includes("timestamp");
+  const findAerisHeader = (directName, suffixes) =>
+    findHeaderIndex(headers, (header) =>
+      isDirectAerisFormat
+        ? header === directName
+        : suffixes.some((suffix) => header.endsWith(suffix)),
+    );
+  const timeIdx = findAerisHeader("timestamp", ["utctime"]);
+  const methaneIdx = findAerisHeader("ch4_ppm", [".ch4"]);
   const acetyleneIdx = findHeaderIndex(headers, (header) =>
-    header.endsWith(".c2h2_ppb"),
+    isDirectAerisFormat
+      ? header === "c2h2_ppb"
+      : header.endsWith(".c2h2_ppb"),
   );
   const nitrousOxideIdx = findHeaderIndex(headers, (header) =>
-    header.endsWith(".n2o"),
+    isDirectAerisFormat ? header === "n2o_ppm" : header.endsWith(".n2o"),
   );
-  const latitudeIdx = findHeaderIndex(headers, (header) => header.endsWith(".lat"));
-  const longitudeIdx = findHeaderIndex(headers, (header) => header.endsWith(".lon"));
-  const altitudeIdx = findHeaderIndex(headers, (header) => header.endsWith(".alt"));
-  const windUIdx = findHeaderIndex(headers, (header) => header.endsWith(".velx"));
-  const windVIdx = findHeaderIndex(headers, (header) => header.endsWith(".vely"));
-  const windWIdx = findHeaderIndex(headers, (header) => header.endsWith(".velz"));
+  const latitudeIdx = findAerisHeader("latitude", [".lat"]);
+  const longitudeIdx = findAerisHeader("longitude", [".lon"]);
+  const altitudeIdx = findAerisHeader("altitude", [".alt"]);
+  const windUIdx = findAerisHeader("wind_u", [".velx"]);
+  const windVIdx = findAerisHeader("wind_v", [".vely"]);
+  const windWIdx = findAerisHeader("wind_w", [".velz"]);
   const flightStatusIdx = findHeaderIndex(
     headers,
-    (header) => header === "flight_status" || header.endsWith(".flight_status"),
+    (header) =>
+      header === "flight_status" || header.endsWith(".flight_status"),
   );
+  const methaneValidIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("ch4_valid")
+    : -1;
+  const methanePressureIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("ch4_pressure_mbar")
+    : -1;
+  const methanePowerIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("ch4_power_input_mv")
+    : -1;
+  const nitrousOxidePressureIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("n2o_pressure_mbar")
+    : -1;
+  const nitrousOxidePowerIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("n2o_power_input_mv")
+    : -1;
+  const nitrousOxideValidIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("n2o_valid")
+    : -1;
+  const acetylenePressureIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("c2h2_pressure_mbar")
+    : -1;
+  const acetylenePowerIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("c2h2_power_input_mv")
+    : -1;
+  const acetyleneValidIdx = isDirectAerisFormat
+    ? normalizedHeaders.indexOf("c2h2_valid")
+    : -1;
 
   if (timeIdx === -1) {
     return null;
@@ -587,6 +638,15 @@ const parseAerisCsvToMissionResults = (
     methane: null,
     acetylene: null,
     nitrousOxide: null,
+    methane_valid: null,
+    methanePressureMbar: null,
+    methanePowerInputMv: null,
+    nitrousOxidePressureMbar: null,
+    nitrousOxidePowerInputMv: null,
+    nitrousOxideValid: null,
+    acetylenePressureMbar: null,
+    acetylenePowerInputMv: null,
+    acetyleneValid: null,
     latitude: null,
     longitude: null,
     altitude: null,
@@ -612,6 +672,8 @@ const parseAerisCsvToMissionResults = (
       acetyleneIdx !== -1 ? parseNumber(cols[acetyleneIdx]) : null;
     const nitrousOxide =
       nitrousOxideIdx !== -1 ? parseNumber(cols[nitrousOxideIdx]) : null;
+    const methaneValid =
+      methaneValidIdx !== -1 ? parseNumber(cols[methaneValidIdx]) : null;
     const rawLatitude = latitudeIdx !== -1 ? parseNumber(cols[latitudeIdx]) : null;
     const rawLongitude =
       longitudeIdx !== -1 ? parseNumber(cols[longitudeIdx]) : null;
@@ -626,7 +688,7 @@ const parseAerisCsvToMissionResults = (
     const flightStatus =
       flightStatusIdx !== -1 ? parseNumber(cols[flightStatusIdx]) : null;
 
-    if (!shouldDisplayTelemetry({ flight_status: flightStatus })) {
+    if (!isDirectAerisFormat && !shouldDisplayTelemetry({ flight_status: flightStatus })) {
       continue;
     }
 
@@ -634,6 +696,33 @@ const parseAerisCsvToMissionResults = (
       methane,
       acetylene: acetylenePpb !== null ? acetylenePpb / 1000 : null,
       nitrousOxide,
+      methane_valid: methaneValid,
+      methanePressureMbar:
+        methanePressureIdx !== -1 ? parseNumber(cols[methanePressureIdx]) : null,
+      methanePowerInputMv:
+        methanePowerIdx !== -1 ? parseNumber(cols[methanePowerIdx]) : null,
+      nitrousOxidePressureMbar:
+        nitrousOxidePressureIdx !== -1
+          ? parseNumber(cols[nitrousOxidePressureIdx])
+          : null,
+      nitrousOxidePowerInputMv:
+        nitrousOxidePowerIdx !== -1
+          ? parseNumber(cols[nitrousOxidePowerIdx])
+          : null,
+      nitrousOxideValid:
+        nitrousOxideValidIdx !== -1
+          ? parseNumber(cols[nitrousOxideValidIdx])
+          : null,
+      acetylenePressureMbar:
+        acetylenePressureIdx !== -1
+          ? parseNumber(cols[acetylenePressureIdx])
+          : null,
+      acetylenePowerInputMv:
+        acetylenePowerIdx !== -1
+          ? parseNumber(cols[acetylenePowerIdx])
+          : null,
+      acetyleneValid:
+        acetyleneValidIdx !== -1 ? parseNumber(cols[acetyleneValidIdx]) : null,
       latitude: normalizedCoordinates.latitude,
       longitude: normalizedCoordinates.longitude,
       altitude,

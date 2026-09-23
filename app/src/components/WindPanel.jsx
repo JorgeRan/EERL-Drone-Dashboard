@@ -9,8 +9,10 @@ export function WindPanel({ windSamples = [] }) {
   const validWindSamples = useMemo(
     () =>
       (Array.isArray(windSamples) ? windSamples : []).filter(
-        ({ u, v, w }) =>
-          Number.isFinite(u) || Number.isFinite(v) || Number.isFinite(w),
+        (sample) =>
+          Number.isFinite(sample?.u ?? sample?.wind_u) ||
+          Number.isFinite(sample?.v ?? sample?.wind_v) ||
+          Number.isFinite(sample?.w ?? sample?.wind_w),
       ),
     [windSamples],
   );
@@ -26,10 +28,14 @@ export function WindPanel({ windSamples = [] }) {
       };
     }
 
-    const speed = validWindSamples.map(({ u, v }) =>
-      Math.sqrt((u ?? 0) * (u ?? 0) + (v ?? 0) * (v ?? 0)),
-    );
-    const direction = validWindSamples.map(({ u, v }) => {
+    const speed = validWindSamples.map((sample) => {
+      const u = sample.u ?? sample.wind_u ?? 0;
+      const v = sample.v ?? sample.wind_v ?? 0;
+      return Math.sqrt(u * u + v * v);
+    });
+    const direction = validWindSamples.map((sample) => {
+      const u = sample.u ?? sample.wind_u ?? 0;
+      const v = sample.v ?? sample.wind_v ?? 0;
       return (Math.atan2(u, v) * 180 / Math.PI + 360) % 360;
     });
 
@@ -50,7 +56,10 @@ export function WindPanel({ windSamples = [] }) {
       averageSpeed: speed.reduce((sum, value) => sum + value, 0) / speed.length,
       peakSpeed: Math.max(...speed),
       averageVertical:
-        validWindSamples.reduce((sum, sample) => sum + (sample.w ?? 0), 0) /
+        validWindSamples.reduce(
+          (sum, sample) => sum + (sample.w ?? sample.wind_w ?? 0),
+          0,
+        ) /
         validWindSamples.length,
     };
   }, [validWindSamples]);
