@@ -1,4 +1,11 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Messages } from "primereact/messages";
 import "primereact/resources/themes/lara-light-indigo/theme.css";
 import "primereact/resources/primereact.min.css";
@@ -12,7 +19,7 @@ import { DataPage } from "./components/DataPage";
 import { ResultsPage } from "./components/ResultsPage";
 import { MeasurementControls } from "./components/MeasurementControls";
 import { MissionModal } from "./components/MissionModal";
-import {DeckMap} from "./components/DeckMap";
+import { DeckMap } from "./components/DeckMap";
 import { Map } from "./components/Map";
 import { buildDeckTracePointsFromFlowData } from "./shared/deckTraceData";
 import {
@@ -37,8 +44,11 @@ import {
   waitForBackendReady,
 } from "./services/api";
 import SignalStatus from "./components/SignalStatus";
-import { sampleSignalHistory, sampleSeqHistory } from "./components/signalStatusTestData";
-import { Signal } from "lucide-react";
+import {
+  sampleSignalHistory,
+  sampleSeqHistory,
+} from "./components/signalStatusTestData";
+import { Signal, Upload } from "lucide-react";
 import { COMPort } from "./components/COMPort";
 
 const sensorsMode = [
@@ -281,14 +291,11 @@ const buildFlowDataFromHistory = (historyRows) => {
       latitude: getTelemetryCoordinate(row, "latitude"),
       longitude: getTelemetryCoordinate(row, "longitude"),
       wind_u:
-        toFiniteNumber(row.wind_u) ??
-        getTelemetryWindComponent(payload, "x"),
+        toFiniteNumber(row.wind_u) ?? getTelemetryWindComponent(payload, "x"),
       wind_v:
-        toFiniteNumber(row.wind_v) ??
-        getTelemetryWindComponent(payload, "y"),
+        toFiniteNumber(row.wind_v) ?? getTelemetryWindComponent(payload, "y"),
       wind_w:
-        toFiniteNumber(row.wind_w) ??
-        getTelemetryWindComponent(payload, "z"),
+        toFiniteNumber(row.wind_w) ?? getTelemetryWindComponent(payload, "z"),
       distance: row.distance ?? null,
       methane_valid: getTelemetryMethaneValidity({ ...row, payload }),
       speed: getTelemetrySpeed(row),
@@ -448,7 +455,8 @@ const appendFlowPoints = (series, telemetryRows, { maxPoints = null } = {}) => {
   const lastExistingPoint = existingSeries[existingSeries.length - 1] || null;
   const canFastAppend =
     !lastExistingPoint ||
-    sortedNewPoints[0].timestampMs >= Number(lastExistingPoint.timestampMs || 0);
+    sortedNewPoints[0].timestampMs >=
+      Number(lastExistingPoint.timestampMs || 0);
 
   if (canFastAppend) {
     // sampleOrder is a monotonic counter, not an array index, so trimming the
@@ -472,9 +480,10 @@ const appendFlowPoints = (series, telemetryRows, { maxPoints = null } = {}) => {
 
   const merged = existingSeries.concat(sortedNewPoints);
   const sorted = merged.sort((a, b) => a.timestampMs - b.timestampMs);
-  const trimmed = maxPoints !== null && sorted.length > maxPoints
-    ? sorted.slice(sorted.length - maxPoints)
-    : sorted;
+  const trimmed =
+    maxPoints !== null && sorted.length > maxPoints
+      ? sorted.slice(sorted.length - maxPoints)
+      : sorted;
 
   return trimmed.map((point, index) => ({
     ...point,
@@ -497,7 +506,9 @@ const buildCombinedFlowDataForDrones = ({
       .filter(Boolean),
   );
 
-  const visibleDevices = devices.filter((device) => visibleIdSet.has(device.id));
+  const visibleDevices = devices.filter((device) =>
+    visibleIdSet.has(device.id),
+  );
   if (!visibleDevices.length) {
     return [];
   }
@@ -670,6 +681,8 @@ function App() {
 
   const [TELEMETRY_SOURCE, setTelemetrySource] = useState("MQTT");
   const [showDashboardPlotData, setShowDashboardPlotData] = useState(true);
+  const siteCsvInputRef = useRef(null);
+  const [siteImportMessage, setSiteImportMessage] = useState("");
   const [methaneValidityVisibility, setMethaneValidityVisibility] = useState({
     valid: true,
     invalid: true,
@@ -742,7 +755,10 @@ function App() {
       };
     }
 
-    const safeStart = Math.max(0, Math.min(selectedWindow.startIndex ?? 0, dataLength - 2));
+    const safeStart = Math.max(
+      0,
+      Math.min(selectedWindow.startIndex ?? 0, dataLength - 2),
+    );
     const safeEnd = Math.max(
       safeStart + 1,
       Math.min(selectedWindow.endIndex ?? dataLength - 1, dataLength - 1),
@@ -875,9 +891,13 @@ function App() {
 
           queuedEntries.forEach(([droneId, telemetryRows]) => {
             const currentSeries = previous[droneId] || [];
-            const updatedSeries = appendFlowPoints(currentSeries, telemetryRows, {
-              maxPoints: MEASUREMENT_TRACE_STORAGE_LIMIT,
-            });
+            const updatedSeries = appendFlowPoints(
+              currentSeries,
+              telemetryRows,
+              {
+                maxPoints: MEASUREMENT_TRACE_STORAGE_LIMIT,
+              },
+            );
 
             if (updatedSeries !== currentSeries) {
               next[droneId] = updatedSeries;
@@ -924,11 +944,15 @@ function App() {
           packets.forEach((packet) => {
             const packetDataForSeries = packet?.telemetry;
 
-            if (!packetDataForSeries?.droneId && !packetDataForSeries?.drone_id) {
+            if (
+              !packetDataForSeries?.droneId &&
+              !packetDataForSeries?.drone_id
+            ) {
               return;
             }
 
-            const droneId = packetDataForSeries.drone_id || packetDataForSeries.droneId;
+            const droneId =
+              packetDataForSeries.drone_id || packetDataForSeries.droneId;
             const source =
               packet?.source === "UDP"
                 ? "UDP"
@@ -1044,57 +1068,52 @@ function App() {
       .filter((device) => dashboardDroneVisibility[device.id] !== false)
       .map((device) => device.id);
   }, [dashboardDroneVisibility, showDashboardPlotData]);
-  const dashboardMapTracePointsImmediate = useMemo(
-    () => {
-      if (currentView !== "dashboard") {
-        return [];
-      }
+  const dashboardMapTracePointsImmediate = useMemo(() => {
+    if (currentView !== "dashboard") {
+      return [];
+    }
 
-      const combinedFlowData = buildCombinedFlowDataForDrones({
-        devices,
-        measurementTraceByDrone,
-        liveTelemetryByDrone,
-        recordedFlowDataByDrone,
-        visibleDroneIds: visibleDashboardDroneIds,
-        maxTotalPoints: DASHBOARD_MAP_SOURCE_POINT_LIMIT,
-      });
-      const methaneFilteredFlowData = combinedFlowData.filter((point) =>
-        shouldIncludeMethaneValidity(point, methaneValidityVisibility),
-      );
-      const baseMapFlowData = methaneFilteredFlowData.length
-        ? methaneFilteredFlowData
-        : combinedFlowData;
-      const mapFlowData = baseMapFlowData.filter(
-        (point) => getDashboardFlowSelectionValue(point) !== null,
-      );
-
-      return buildDeckTracePointsFromFlowData(
-        filterFlowPointsOutsideStartRadius(mapFlowData, {
-          enabled: startPointFilterEnabled,
-          startPoint: startPointCoordinates,
-          radiusMeters: startPointFilterRadiusMeters,
-        }),
-      ).map(toDashboardMapTracePoint);
-    },
-    [
-      currentView,
+    const combinedFlowData = buildCombinedFlowDataForDrones({
+      devices,
       measurementTraceByDrone,
       liveTelemetryByDrone,
       recordedFlowDataByDrone,
-      visibleDashboardDroneIds,
-      selectedWindowForDashboard,
-      methaneValidityVisibility,
-      startPointCoordinates,
-      startPointFilterEnabled,
-      startPointFilterRadiusMeters,
-    ],
-  );
+      visibleDroneIds: visibleDashboardDroneIds,
+      maxTotalPoints: DASHBOARD_MAP_SOURCE_POINT_LIMIT,
+    });
+    const methaneFilteredFlowData = combinedFlowData.filter((point) =>
+      shouldIncludeMethaneValidity(point, methaneValidityVisibility),
+    );
+    const baseMapFlowData = methaneFilteredFlowData.length
+      ? methaneFilteredFlowData
+      : combinedFlowData;
+    const mapFlowData = baseMapFlowData.filter(
+      (point) => getDashboardFlowSelectionValue(point) !== null,
+    );
+
+    return buildDeckTracePointsFromFlowData(
+      filterFlowPointsOutsideStartRadius(mapFlowData, {
+        enabled: startPointFilterEnabled,
+        startPoint: startPointCoordinates,
+        radiusMeters: startPointFilterRadiusMeters,
+      }),
+    ).map(toDashboardMapTracePoint);
+  }, [
+    currentView,
+    measurementTraceByDrone,
+    liveTelemetryByDrone,
+    recordedFlowDataByDrone,
+    visibleDashboardDroneIds,
+    selectedWindowForDashboard,
+    methaneValidityVisibility,
+    startPointCoordinates,
+    startPointFilterEnabled,
+    startPointFilterRadiusMeters,
+  ]);
 
   const dashboardMapTracePoints = useDeferredValue(
     dashboardMapTracePointsImmediate,
   );
-
-  
 
   const latestPointByDrone = useMemo(() => {
     const entries = {};
@@ -1216,6 +1235,94 @@ function App() {
       ...previous,
       [droneId]: previous[droneId] === false,
     }));
+  }, []);
+  const handleSiteCsvInport = useCallback((event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      try {
+        const text = String(reader.result ?? "");
+        const lines = text
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0);
+
+        if (lines.length < 2) {
+          setSiteImportMessage("CSV has no data rows");
+          return;
+        }
+
+        const delimiter =
+          (lines[0].match(/;/g) || []).length >
+          (lines[0].match(/,/g) || []).length
+            ? ";"
+            : ",";
+        const stripQuotes = (value) =>
+          String(value ?? "")
+            .trim()
+            .replace(/^"(.*)"$/, "$1")
+            .trim();
+        const headers = lines[0]
+          .split(delimiter)
+          .map((header) => stripQuotes(header).toLowerCase());
+        const latitudeIndex = headers.findIndex(
+          (header) => header.includes("latitude") || header === "lat",
+        );
+        const longitudeIndex = headers.findIndex(
+          (header) =>
+            header.includes("longitude") ||
+            header === "lon" ||
+            header === "lng" ||
+            header === "long",
+        );
+
+        if (latitudeIndex === -1 || longitudeIndex === -1) {
+          setSiteImportMessage("Missing latitude/longitude columns");
+          return;
+        }
+
+        let importedCount = 0;
+        for (let index = 1; index < lines.length; index += 1) {
+          const columns = lines[index]
+            .split(delimiter)
+            .map((value) => stripQuotes(value));
+          const latitude = Number(columns[latitudeIndex]);
+          const longitude = Number(columns[longitudeIndex]);
+
+          if (
+            Number.isFinite(latitude) &&
+            Number.isFinite(longitude) &&
+            latitude >= -90 &&
+            latitude <= 90 &&
+            longitude >= -180 &&
+            longitude <= 180
+          ) {
+            importedCount += 1;
+          }
+        }
+
+        setSiteImportMessage(
+          importedCount > 0
+            ? `Imported ${importedCount} site${importedCount === 1 ? "" : "s"}`
+            : "No valid sites found",
+        );
+      } catch (error) {
+        console.error("Failed to parse site CSV", error);
+        setSiteImportMessage("Failed to parse CSV");
+      }
+    };
+
+    reader.onerror = () => {
+      setSiteImportMessage("Failed to read file");
+    };
+
+    reader.readAsText(file);
   }, []);
   const missionDroneIds = useMemo(
     () =>
@@ -1349,7 +1456,8 @@ function App() {
         life: 3500,
         severity: "warn",
         summary: "Measurement Active",
-        detail: "Stop the current measurement before continuing another mission.",
+        detail:
+          "Stop the current measurement before continuing another mission.",
         closable: true,
       });
       return;
@@ -1443,15 +1551,15 @@ function App() {
 
     const missionPayload = continuingMission
       ? {
-        results: missionResults,
-      }
+          results: missionResults,
+        }
       : {
-        id: `mission-${Date.now()}`,
-        name: missionName.trim() || `Mission ${new Date().toLocaleString()}`,
-        createdAt: new Date().toISOString(),
-        elapsedSeconds: measurementElapsedSeconds,
-        results: missionResults,
-      };
+          id: `mission-${Date.now()}`,
+          name: missionName.trim() || `Mission ${new Date().toLocaleString()}`,
+          createdAt: new Date().toISOString(),
+          elapsedSeconds: measurementElapsedSeconds,
+          results: missionResults,
+        };
 
     const savedMission = continuingMission
       ? await updateMission(continuingMission.id, missionPayload)
@@ -1700,7 +1808,6 @@ function App() {
                   latestPointByDrone={latestPointByDrone}
                 />
               </div>
-              
             </div>
             <div className="grid w-full gap-3">
               <div className="flex flex-row gap-3">
@@ -1789,7 +1896,40 @@ function App() {
                       </div>
                     </div>
                   </div>
-                  <COMPort />
+                  <div
+                    className="flex h-full items-center gap-3 rounded-lg border px-3 py-2"
+                    style={{
+                      backgroundColor: color.card,
+                      borderColor: color.border,
+                    }}
+                  >
+                    <input
+                      ref={siteCsvInputRef}
+                      type="file"
+                      accept=".csv,text/csv,.xlsx"
+                      className="hidden"
+                      onChange={handleSiteCsvInport}
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => siteCsvInputRef.current?.click()}
+                      className="flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-white"
+                      style={{ backgroundColor: color.orange }}
+                    >
+                      <Upload size={15} />
+                      Import Sites
+                    </button>
+                    {siteImportMessage && (
+                      <span
+                        className="max-w-28 text-xs"
+                        style={{ color: color.textMuted }}
+                      >
+                        {siteImportMessage}
+                      </span>
+                    )}
+                  </div>
+                  {/* <COMPort /> */}
                   {/* <div
                     className="flex flex-row h-full items-center rounded-lg border p-3 gap-4"
                     style={{
@@ -1811,15 +1951,15 @@ function App() {
                       }
                       color={color}
                     /> */}
-                    
-                    {/* <SignalStatus
+
+                  {/* <SignalStatus
                       signalHistory={sampleSignalHistory}
                       seqHistory={sampleSeqHistory}
                       color={color}
                     /> 
                   </div> */}
                 </div>
-                
+
                 <MeasurementControls
                   status={measurementStatus}
                   elapsedSeconds={measurementElapsedSeconds}
@@ -1829,11 +1969,10 @@ function App() {
                   onResume={handleResumeMeasurement}
                   onStop={() => setIsMissionModalOpen(true)}
                 />
-
               </div>
 
               {/* <div className="grid w-full gap-3 xl:grid-cols-[1.4fr_0.8fr]"> */}
-               <div className="grid w-full gap-3 ">
+              <div className="grid w-full gap-3 ">
                 <Map
                   traceDataset={EMPTY_FEATURE_COLLECTION}
                   tracePoints={dashboardMapTracePoints}
@@ -1860,7 +1999,9 @@ function App() {
                     setStartPointFilterEnabled((previous) => !previous)
                   }
                   startPointFilterRadiusMeters={startPointFilterRadiusMeters}
-                  onStartPointFilterRadiusChange={setStartPointFilterRadiusMeters}
+                  onStartPointFilterRadiusChange={
+                    setStartPointFilterRadiusMeters
+                  }
                   startPointPickModeEnabled={startPointPickModeEnabled}
                   onStartPointPickModeChange={setStartPointPickModeEnabled}
                   startPointCoordinates={startPointCoordinates}
@@ -1892,7 +2033,6 @@ function App() {
                   <WindPanel windSamples={windSamples} />
                 </div>
               )}
-              
             </div>
           </div>
         </section>
