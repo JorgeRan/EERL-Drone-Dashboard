@@ -3,9 +3,13 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883';
-const mqttUsername = process.env.MQTT_USERNAME || 'EERL-MQTT';
-const mqttPassword = process.env.MQTT_PASSWORD || 'CH4Drone';
+// const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883';
+// const mqttUsername = process.env.MQTT_USERNAME || 'EERL-MQTT';
+// const mqttPassword = process.env.MQTT_PASSWORD || 'CH4Drone';
+
+const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtts://rabbit.lmq.cloudamqp.com:8883';
+const mqttUsername = process.env.MQTT_USERNAME || 'aqtkdpnn:aqtkdpnn';
+const mqttPassword = process.env.MQTT_PASSWORD || '0YFCWWHfi8mtq92DSLRnCessZDpQqAlW';
 const publishIntervalMs = Number(process.env.SIM_INTERVAL_MS || 500);
 const simulatorVerbose = process.env.SIM_VERBOSE === 'true';
 const summaryEveryTicks = Math.max(1, Number(process.env.SIM_LOG_EVERY_TICKS || 5));

@@ -3,15 +3,25 @@ import mqtt from 'mqtt';
 const sourceBrokerUrl = process.env.SOURCE_BROKER_URL || 'mqtt://broker.hivemq.com:1883';
 const sourceTopic = process.env.SOURCE_TOPIC || 'DroneData';
 
-const targetBrokerUrl = process.env.TARGET_BROKER_URL || 'mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883';
+// const targetBrokerUrl = process.env.TARGET_BROKER_URL || 'mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883';
+
+const targetBrokerUrl = process.env.TARGET_BROKER_URL || 'mqtts://rabbit.lmq.cloudamqp.com:8883'
+
 const droneTopics = new Map([
   ['M350', 'M350/data'],
   ['M400-1', 'M400-1/data'],
   ['M400-2', 'M400-2/data'],
 ]);
 const targetTopics = [...droneTopics.values()];
-const targetUsername = process.env.TARGET_MQTT_USERNAME || 'EERL-MQTT';
-const targetPassword = process.env.TARGET_MQTT_PASSWORD || 'CH4Drone';
+
+//MQTT credentials for HiveMQ Cloud serverless cluster
+// const targetUsername = process.env.TARGET_MQTT_USERNAME || 'EERL-MQTT';
+// const targetPassword = process.env.TARGET_MQTT_PASSWORD || 'CH4Drone';
+
+
+// AMQP credentials for LavinMQ Cloud
+const targetUsername = process.env.TARGET_MQTT_USERNAME || 'aqtkdpnn:aqtkdpnn';
+const targetPassword = process.env.TARGET_MQTT_PASSWORD || '0YFCWWHfi8mtq92DSLRnCessZDpQqAlW';
 const targetRetain = process.env.TARGET_RETAIN === 'true';
 const verifyTarget = process.env.VERIFY_TARGET !== 'false';
 const targetUrl = new URL(targetBrokerUrl);

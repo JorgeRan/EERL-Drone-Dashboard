@@ -19,6 +19,7 @@ import { DataPage } from "./components/DataPage";
 import { ResultsPage } from "./components/ResultsPage";
 import { MeasurementControls } from "./components/MeasurementControls";
 import { MissionModal } from "./components/MissionModal";
+import { ImportSitesModal } from "./components/ImportSitesModal";
 import { DeckMap } from "./components/DeckMap";
 import { Map } from "./components/Map";
 import { buildDeckTracePointsFromFlowData } from "./shared/deckTraceData";
@@ -48,7 +49,7 @@ import {
   sampleSignalHistory,
   sampleSeqHistory,
 } from "./components/signalStatusTestData";
-import { Signal, Upload } from "lucide-react";
+import { Import, MapPinned, Signal, Upload } from "lucide-react";
 import { COMPort } from "./components/COMPort";
 
 const sensorsMode = [
@@ -673,7 +674,7 @@ function App() {
   const lastMissionPromptAtRef = useRef(0);
   const missionPromptSnoozeUntilRef = useRef(0);
   const msgs = useRef(null);
-
+  const [isSiteManagerOpen, setIsSiteManagerOpen] = useState(false);
   const [isMissionModalOpen, setIsMissionModalOpen] = useState(false);
   const [missionName, setMissionName] = useState("");
   const [deleteHoldProgress, setDeleteHoldProgress] = useState(0);
@@ -1913,12 +1914,12 @@ function App() {
 
                     <button
                       type="button"
-                      onClick={() => siteCsvInputRef.current?.click()}
+                      onClick={() => setIsSiteManagerOpen(true)}
                       className="flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-white"
                       style={{ backgroundColor: color.orange }}
                     >
-                      <Upload size={15} />
-                      Import Sites
+                      <MapPinned size={15} />
+                      Site Manager
                     </button>
                     {siteImportMessage && (
                       <span
@@ -2036,6 +2037,12 @@ function App() {
             </div>
           </div>
         </section>
+        {isSiteManagerOpen && (
+          <ImportSitesModal
+            onClose={() => setIsSiteManagerOpen(false)}
+            onComplete={() => setIsSiteManagerOpen(false)}
+          />
+        )}
       </main>
     </div>
   );
