@@ -675,6 +675,7 @@ function App() {
   const missionPromptSnoozeUntilRef = useRef(0);
   const msgs = useRef(null);
   const [isSiteManagerOpen, setIsSiteManagerOpen] = useState(false);
+  const [savedSites, setSavedSites] = useState([]);
   const [isMissionModalOpen, setIsMissionModalOpen] = useState(false);
   const [missionName, setMissionName] = useState("");
   const [deleteHoldProgress, setDeleteHoldProgress] = useState(0);
@@ -2040,7 +2041,8 @@ function App() {
         {isSiteManagerOpen && (
           <ImportSitesModal
             onClose={() => setIsSiteManagerOpen(false)}
-            onComplete={() => setIsSiteManagerOpen(false)}
+            sites={savedSites}
+            onSaveSite={(site) => setSavedSites((previous) => [...previous, site])}
           />
         )}
       </main>

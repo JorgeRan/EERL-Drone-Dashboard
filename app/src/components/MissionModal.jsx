@@ -19,6 +19,7 @@ export function MissionModal({ children, onClose, size = 'default' }) {
         style={{
           ...styles.modal,
           ...(size === 'wide' ? styles.modalWide : null),
+          ...(size === 'editor' ? styles.modalEditor : null),
         }}
         onMouseDown={(event) => event.stopPropagation()}
         role="dialog"
@@ -66,6 +67,9 @@ const styles = {
   modalWide: {
     maxWidth: 'min(1440px, calc(100vw - 32px))',
     minHeight: 'min(920px, calc(100vh - 40px))',
+  },
+  modalEditor: {
+    maxWidth: '1200px',
   },
   closeButton: {
     position: 'absolute',

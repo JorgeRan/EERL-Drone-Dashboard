@@ -27,11 +27,16 @@ dotenv.config({ path: path.join(__dirname, "..", "app", ".env") });
 dotenv.config({ path: path.join(__dirname, ".env") });
 dotenv.config();
 
+// const brokerUrl =
+//   process.env.MQTT_BROKER_URL ||
+//   "mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883";
+// const mqttUsername = process.env.MQTT_USERNAME || "EERL-MQTT";
+// const mqttPassword = process.env.MQTT_PASSWORD || "CH4Drone";
 const brokerUrl =
   process.env.MQTT_BROKER_URL ||
-  "mqtts://1ff7f31f358d46628258e87380e60321.s1.eu.hivemq.cloud:8883";
-const mqttUsername = process.env.MQTT_USERNAME || "EERL-MQTT";
-const mqttPassword = process.env.MQTT_PASSWORD || "CH4Drone";
+  "mqtts://rabbit.lmq.cloudamqp.com:8883";
+const mqttUsername = process.env.MQTT_USERNAME || "aqtkdpnn:aqtkdpnn";
+const mqttPassword = process.env.MQTT_PASSWORD || "0YFCWWHfi8mtq92DSLRnCessZDpQqAlW";
 const mqttTopics = (
   process.env.MQTT_TOPICS || "M350/data,M400-1/data,M400-2/data"
 )
