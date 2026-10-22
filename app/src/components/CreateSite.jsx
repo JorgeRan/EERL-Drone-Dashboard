@@ -20,9 +20,9 @@ import { coordinateSiteLocations, searchMapboxLocations } from "../services/site
 
 const TOOLS = [
   { id: "navigate", label: "Pan / edit", icon: <Hand size={17} /> },
-  { id: "point", label: "Point", icon: <MapPin size={17} /> },
-  { id: "rectangle", label: "Rectangle", icon: <Square size={17} /> },
+  // { id: "point", label: "Point", icon: <MapPin size={17} /> },
   { id: "polygon", label: "Polygon", icon: <Pentagon size={17} /> },
+  { id: "rectangle", label: "Rectangle", icon: <Square size={17} /> },
   { id: "radius", label: "Radius", icon: <Circle size={17} /> },
 ];
 const EMPTY = { type: "FeatureCollection", features: [] };
@@ -68,9 +68,11 @@ export function CreateSite({ onBack, onSave }) {
         if (!controller.signal.aborted) setSearchResponse({ query, results: locations, error: "" });
       } catch (error) {
         if (!controller.signal.aborted) {
-          setSearchResponse({ query, results: [], error: error instanceof TypeError
-            ? "Location search is unavailable. Check your connection or enter coordinates."
-            : error.message });
+          setSearchResponse({
+            query, results: [], error: error instanceof TypeError
+              ? "Location search is unavailable. Check your connection or enter coordinates."
+              : error.message
+          });
         }
       }
     }, 300);
@@ -91,7 +93,9 @@ export function CreateSite({ onBack, onSave }) {
       zoom: 17,
       attributionControl: onlineMap ? { compact: true } : false,
     });
+    
     const draw = new MapboxDraw({ displayControlsDefault: false });
+
     map.addControl(draw);
     map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
     map.addControl(new mapboxgl.ScaleControl({ unit: "metric" }), "bottom-left");
@@ -127,8 +131,8 @@ export function CreateSite({ onBack, onSave }) {
 
     map.on("load", () => {
       map.addSource("site-preview", { type: "geojson", data: EMPTY });
-      map.addLayer({ id: "site-preview-fill", type: "fill", source: "site-preview", paint: { "fill-color": color.orange, "fill-opacity": 0.2 } });
-      map.addLayer({ id: "site-preview-line", type: "line", source: "site-preview", paint: { "line-color": color.orange, "line-width": 2, "line-dasharray": [2, 2] } });
+      map.addLayer({ id: "site-preview-fill", type: "fill", source: "site-preview", paint: { "fill-color": color.green, "fill-opacity": 0.2 } });
+      map.addLayer({ id: "site-preview-line", type: "line", source: "site-preview", paint: { "line-color": color.green, "line-width": 2, "line-dasharray": [2, 2] } });
       setMapReady(true);
     });
     map.on("error", (event) => setMapError(event.error?.message || "Map unavailable"));
@@ -264,7 +268,6 @@ export function CreateSite({ onBack, onSave }) {
       <header className="create-site-heading">
         <button type="button" className="site-icon-button" onClick={onBack} aria-label="Back to Site Manager" title="Back to Site Manager"><ArrowLeft size={20} /></button>
         <div><h2>Create Site</h2><p>Define a survey area for your drone missions.</p></div>
-        <span className="site-draft">Draft</span>
       </header>
 
       <div className="site-search" onBlur={(event) => {
@@ -321,7 +324,7 @@ export function CreateSite({ onBack, onSave }) {
         <div className="site-history-tools">
           <button type="button" className="site-icon-button" disabled={!mapReady || (!historyLength && tool === "navigate")} onClick={() => controls.current?.undo()} aria-label="Undo last action" title="Undo last action"><Undo2 size={17} /></button>
           <button type="button" className="site-icon-button" disabled={!mapReady} onClick={() => controls.current?.clear()} aria-label="Clear boundary" title="Clear boundary"><Trash2 size={17} /></button>
-          <button type="button" className="site-icon-button" disabled={!mapReady} onClick={() => selectResult({ name: "EERL survey field, Ottawa", latitude: traceOrigin.latitude, longitude: traceOrigin.longitude })} aria-label="Return to survey field" title="Return to survey field"><LocateFixed size={17} /></button>
+          <button type="button" className="site-icon-button" disabled={!mapReady} onClick={() => selectResult({ name: "EERL HQ, Ottawa", latitude: traceOrigin.latitude, longitude: traceOrigin.longitude })} aria-label="Return to HQ" title="Return to HQ"><LocateFixed size={17} /></button>
           <button type="button" className="site-icon-button" onClick={() => setDetailsOpen(!detailsOpen)} aria-expanded={detailsOpen} aria-controls="site-details" aria-label="Toggle site details" title="Toggle site details">{detailsOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
         </div>
       </div>
@@ -339,7 +342,7 @@ export function CreateSite({ onBack, onSave }) {
         {detailsOpen && <form id="site-details" className="site-details" onSubmit={save}>
           <h3>Site details</h3>
           <label htmlFor="site-name">Site name <span aria-hidden="true">*</span></label>
-          <input id="site-name" required maxLength={120} placeholder="e.g. Mer Bleue Survey Area" value={name} onChange={(event) => setName(event.target.value)} />
+          <input id="site-name" required maxLength={120} placeholder="e.g. Colombia Landfill" value={name} onChange={(event) => setName(event.target.value)} />
           <label htmlFor="site-notes">Notes <span>(optional)</span></label>
           <textarea id="site-notes" rows={3} maxLength={2000} placeholder="Survey purpose, access notes, etc." value={notes} onChange={(event) => setNotes(event.target.value)} />
           {isRadius && <><label htmlFor="site-radius">Radius (m)</label><input id="site-radius" type="number" min="1" max="50000" value={radius} onChange={(event) => { const value = Number(event.target.value); setRadius(event.target.value); controls.current?.setRadius(value); }} /></>}

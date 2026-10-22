@@ -19,9 +19,10 @@ dist-ssr
 .idea
 .DS_Store
 .env
-.db
-.db-shm
-.db-wal
+*.db
+*.db-shm
+*.db-wal
+/data/
 *.suo
 *.ntvs*
 *.njsproj

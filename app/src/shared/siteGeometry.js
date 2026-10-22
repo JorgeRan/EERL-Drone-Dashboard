@@ -2,7 +2,7 @@ import { area, bbox, bboxPolygon, booleanValid, circle, distance, kinks } from "
 
 export const sampleSiteLocations = [
   { name: "Mer Bleue Research Area", latitude: 45.409, longitude: -75.518 },
-  { name: "EERL survey field, Ottawa", latitude: 45.3844, longitude: -75.699 },
+  { name: "EERL HQ, Ottawa", latitude: 45.3844, longitude: -75.699 },
   { name: "Bucaramanga survey area", latitude: 7.1193, longitude: -73.1227 },
 ];
 
